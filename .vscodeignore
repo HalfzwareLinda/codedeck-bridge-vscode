@@ -1,0 +1,6 @@
+src/**
+.gitignore
+tsconfig.json
+**/*.ts
+!out/**/*.js
+node_modules/.package-lock.json

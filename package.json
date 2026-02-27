@@ -1,0 +1,74 @@
+{
+  "name": "codedeck-bridge",
+  "displayName": "Codedeck Bridge",
+  "description": "Bridge Claude Code sessions to Codedeck mobile app over Nostr relays",
+  "version": "0.1.0",
+  "publisher": "halfzwarelinda",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/HalfzwareLinda/codedeck-bridge-vscode"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "codedeck.pair",
+        "title": "Codedeck: Pair Phone"
+      },
+      {
+        "command": "codedeck.status",
+        "title": "Codedeck: Show Status"
+      },
+      {
+        "command": "codedeck.disconnect",
+        "title": "Codedeck: Disconnect All"
+      }
+    ],
+    "configuration": {
+      "title": "Codedeck Bridge",
+      "properties": {
+        "codedeck.relays": {
+          "type": "array",
+          "default": [
+            "wss://relay.damus.io",
+            "wss://nos.lol"
+          ],
+          "description": "Nostr relay URLs for phone communication"
+        },
+        "codedeck.machineName": {
+          "type": "string",
+          "default": "",
+          "description": "Display name for this machine (defaults to hostname)"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "esbuild ./src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node --target=node18 --sourcemap",
+    "watch": "esbuild ./src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node --target=node18 --sourcemap --watch",
+    "typecheck": "tsc --noEmit",
+    "package": "vsce package",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.0.0",
+    "esbuild": "^0.24.2",
+    "typescript": "^5.5.0",
+    "vitest": "^4.0.18"
+  },
+  "dependencies": {
+    "nostr-tools": "^2.23.1"
+  }
+}
