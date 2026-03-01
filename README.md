@@ -16,6 +16,9 @@ Bridges Claude Code sessions running in VSCode to the [Codedeck](https://github.
 - QR code pairing via `codedeck://` deep links
 - NIP-44 encrypted communication over configurable Nostr relays
 - Bidirectional: send input, approve permissions, and change modes from your phone
+- **Plan approval forwarding**: ExitPlanMode tool calls parsed and forwarded as interactive cards
+- **Question forwarding**: AskUserQuestion tool calls forwarded as multi-choice question cards
+- **Remote session creation**: Start new Claude Code terminals from the phone
 - History catch-up on reconnect with sequence-based gap detection
 - Status bar indicator showing connection state
 
