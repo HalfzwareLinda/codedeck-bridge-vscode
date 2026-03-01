@@ -73,6 +73,10 @@ export function activate(context: vscode.ExtensionContext): void {
     switch (status) {
       case 'connected':
         statusBar?.setReady(loadPairedPhones(context).length);
+        // Publish current session list so phones see us immediately
+        if (sessionWatcher) {
+          bridgeCore?.onSessionListChanged(sessionWatcher.getSessions());
+        }
         break;
       case 'disconnected':
         statusBar?.setOffline();
