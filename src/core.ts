@@ -43,19 +43,19 @@ export class BridgeCore {
   private terminal: TerminalSender;
   private sessionProvider: SessionProvider | null = null;
 
-  constructor(config: BridgeCoreConfig, terminal: TerminalSender) {
+  constructor(config: BridgeCoreConfig, terminal: TerminalSender, private log: (msg: string) => void = console.log) {
     this.terminal = terminal;
 
     const relayEvents: NostrRelayEvents = {
       onInput: async (sessionId, text) => {
-        console.log(`[Codedeck] Input for session ${sessionId}: ${text.slice(0, 50)}...`);
+        this.log(`[Codedeck] Input for session ${sessionId}: ${text.slice(0, 50)}...`);
         const sent = await this.terminal.sendText(text, sessionId);
         if (!sent) {
           this.terminal.notifyNoTerminal();
         }
       },
       onCreateSession: async () => {
-        console.log('[Codedeck] Create session request received');
+        this.log('[Codedeck] Create session request received');
         await this.terminal.createSession();
         // Re-publish session list so the phone sees the new session promptly.
         // SessionWatcher will also trigger onSessionListChanged when it detects

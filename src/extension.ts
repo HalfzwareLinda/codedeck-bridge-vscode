@@ -54,6 +54,11 @@ export function activate(context: vscode.ExtensionContext): void {
   // --- Load paired phones ---
   const pairedPhones = loadPairedPhones(context);
 
+  // --- Output channel for visible logging ---
+  const out = vscode.window.createOutputChannel('Codedeck Bridge');
+  context.subscriptions.push(out);
+  const log = (msg: string) => { console.log(msg); out.appendLine(msg); };
+
   // --- Status bar ---
   statusBar = new StatusBar();
   context.subscriptions.push(statusBar);
@@ -67,9 +72,14 @@ export function activate(context: vscode.ExtensionContext): void {
     { secretKey, relays, machineName, pairedPhones },
     {
       sendText: (text, sessionId?) => terminalRegistry.sendText(text, sessionId),
-      createSession: () => terminalRegistry.createSession(),
+      createSession: async () => {
+        log('[Codedeck] Opening Claude Code terminal...');
+        await terminalRegistry.createSession();
+        log('[Codedeck] Claude Code terminal opened');
+      },
       notifyNoTerminal,
     },
+    log,
   );
 
   // Wire connection status to status bar
@@ -80,13 +90,13 @@ export function activate(context: vscode.ExtensionContext): void {
         // Publish current session list so phones see us immediately
         if (sessionWatcher) {
           const sessions = sessionWatcher.getSessions();
-          console.log(`[Codedeck] Relay connected — publishing ${sessions.length} sessions`);
+          log(`[Codedeck] Relay connected — publishing ${sessions.length} sessions`);
           for (const s of sessions) {
-            console.log(`[Codedeck]   session: ${s.slug} (${s.id})`);
+            log(`[Codedeck]   session: ${s.slug} (${s.id})`);
           }
           bridgeCore?.onSessionListChanged(sessions);
         } else {
-          console.log('[Codedeck] Relay connected but sessionWatcher not ready');
+          log('[Codedeck] Relay connected but sessionWatcher not ready');
         }
         break;
       case 'disconnected':

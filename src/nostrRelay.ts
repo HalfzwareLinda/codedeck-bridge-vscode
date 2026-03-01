@@ -90,8 +90,15 @@ export class NostrRelay {
     try {
       this.subscription = this.pool.subscribeMany(
         this.relays,
-        // Listen for both output-kind and session-list-kind events from phones
-        { kinds: [OUTPUT_EVENT_KIND, SESSION_LIST_EVENT_KIND], '#p': [this.pubkeyHex], authors: phonePubkeys },
+        // Listen for both output-kind and session-list-kind events from phones.
+        // `since` prevents replaying historical create-session/input events on reconnect.
+        // Session list (kind 30515) is not affected — the bridge publishes its own on connect.
+        {
+          kinds: [OUTPUT_EVENT_KIND, SESSION_LIST_EVENT_KIND],
+          '#p': [this.pubkeyHex],
+          authors: phonePubkeys,
+          since: Math.floor(Date.now() / 1000) - 5, // only events from now (5s grace)
+        },
         {
           onevent: (event) => {
             this.handleIncomingEvent(event);
@@ -223,7 +230,13 @@ export class NostrRelay {
             content: ciphertext,
           }, this.secretKey);
 
-          await this.pool.publish(this.relays, event);
+          const results = this.pool.publish(this.relays, event);
+          for (let i = 0; i < results.length; i++) {
+            results[i].catch((err: unknown) => {
+              const msg2 = err instanceof Error ? err.message : String(err);
+              console.warn(`[Codedeck] Relay ${this.relays[i]}: output publish failed: ${msg2}`);
+            });
+          }
         } catch (err) {
           console.error(`[Codedeck] Failed to publish output to ${phone.label}:`, err);
         }
@@ -233,7 +246,7 @@ export class NostrRelay {
 
   private static readonly HISTORY_CHUNK_SIZE = 20;
   private static readonly MAX_CHUNK_JSON_BYTES = 48_000;
-  private static readonly CHUNK_DELAY_MS = 100;
+  private static readonly CHUNK_DELAY_MS = 500;
 
   /**
    * Send history response to a specific phone, chunked into multiple events
@@ -289,7 +302,15 @@ export class NostrRelay {
           content: ciphertext,
         }, this.secretKey);
 
-        await this.pool.publish(this.relays, event);
+        const results = this.pool.publish(this.relays, event);
+        const outcomes = await Promise.allSettled(results);
+        for (let j = 0; j < outcomes.length; j++) {
+          if (outcomes[j].status === 'rejected') {
+            const reason = (outcomes[j] as PromiseRejectedResult).reason;
+            const msg2 = reason instanceof Error ? reason.message : String(reason);
+            console.warn(`[Codedeck] Relay ${this.relays[j]}: history publish failed: ${msg2}`);
+          }
+        }
       } catch (err) {
         console.error(`[Codedeck] Failed to publish history chunk ${i + 1}/${totalChunks}:`, err);
       }
@@ -339,10 +360,20 @@ export class NostrRelay {
     this.splitIfOversized(chunk.slice(mid), out);
   }
 
-  private handleIncomingEvent(event: { pubkey: string; content: string }): void {
+  private handleIncomingEvent(event: { pubkey: string; content: string; created_at: number }): void {
+    // Safety net: ignore events older than 60s (in case relays don't enforce `since`)
+    const now = Math.floor(Date.now() / 1000);
+    if (event.created_at < now - 60) {
+      console.log(`[Codedeck] Ignoring stale event (${now - event.created_at}s old)`);
+      return;
+    }
+
     // Verify it's from a paired phone
     const phone = this.pairedPhones.find(p => p.pubkeyHex === event.pubkey);
-    if (!phone) { return; }
+    if (!phone) {
+      console.log(`[Codedeck] Ignoring event from unknown pubkey: ${event.pubkey.slice(0, 8)}...`);
+      return;
+    }
 
     try {
       // NIP-44 decrypt
