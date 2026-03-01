@@ -22,7 +22,7 @@ export interface BridgeCoreConfig {
 }
 
 export interface TerminalSender {
-  sendText: (text: string, sessionId?: string) => Promise<boolean>;
+  sendText: (text: string, sessionId?: string, addNewline?: boolean) => Promise<boolean>;
   createSession: () => Promise<void>;
   notifyNoTerminal: () => void;
 }
@@ -64,8 +64,17 @@ export class BridgeCore {
       onPermissionResponse: (_sessionId, _requestId, _allow) => {
         console.log(`[Codedeck] Permission response received (not yet implemented)`);
       },
-      onModeChange: (_sessionId, _mode) => {
-        console.log(`[Codedeck] Mode change received (not yet implemented)`);
+      onModeChange: (sessionId, mode) => {
+        this.log(`[Codedeck] Mode change for session ${sessionId}: ${mode}`);
+        if (mode === 'plan') {
+          // /plan slash command enters plan mode
+          this.terminal.sendText('/plan', sessionId).catch(err => {
+            console.error('[Codedeck] Mode change send failed:', err);
+          });
+        } else {
+          // No reliable terminal command to exit plan mode — phone tracks optimistically
+          this.log(`[Codedeck] Auto mode for ${sessionId} — tracked on phone only`);
+        }
       },
       onHistoryRequest: (sessionId, afterSeq, phonePubkey) => {
         console.log(`[Codedeck] History request for ${sessionId} (afterSeq: ${afterSeq})`);

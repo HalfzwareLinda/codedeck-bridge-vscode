@@ -164,12 +164,12 @@ export class TerminalRegistry implements vscode.Disposable {
    * If no mapping exists, opens a new Claude Code terminal and queues
    * the text until SessionWatcher correlates the session.
    */
-  async sendText(text: string, sessionId?: string): Promise<boolean> {
+  async sendText(text: string, sessionId?: string, addNewline = true): Promise<boolean> {
     // 1. Try the known terminal for this session
     if (sessionId) {
       const known = this.sessionTerminals.get(sessionId);
       if (known && known.exitStatus === undefined) {
-        known.sendText(text);
+        known.sendText(text, addNewline);
         return true;
       }
       if (known) {
