@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseJsonlLine, extractSessionMeta } from '../jsonlParser';
+import { parseJsonlLine, extractSessionMeta, resolveProjectFromCwd } from '../jsonlParser';
 
 describe('parseJsonlLine', () => {
   it('returns empty for empty input', () => {
@@ -336,5 +336,32 @@ describe('extractSessionMeta', () => {
       slug: 'sess-abc',
       cwd: '/real/path',
     });
+  });
+});
+
+describe('resolveProjectFromCwd', () => {
+  const ws = '/home/jeroen/VScode workspace for building nostr apps';
+
+  it('extracts first subdirectory when cwd is deeper than workspace', () => {
+    expect(resolveProjectFromCwd(ws + '/codedeck/src', ws)).toBe('codedeck');
+    expect(resolveProjectFromCwd(ws + '/atna', ws)).toBe('atna');
+    expect(resolveProjectFromCwd(ws + '/sovereign-agents/scripts/foo', ws)).toBe('sovereign-agents');
+  });
+
+  it('returns null when cwd equals workspace root', () => {
+    expect(resolveProjectFromCwd(ws, ws)).toBeNull();
+  });
+
+  it('returns basename when no workspaceCwd provided', () => {
+    expect(resolveProjectFromCwd('/some/project', undefined)).toBe('project');
+  });
+
+  it('handles trailing slashes', () => {
+    expect(resolveProjectFromCwd(ws + '/codedeck/', ws + '/')).toBe('codedeck');
+    expect(resolveProjectFromCwd(ws + '/', ws)).toBeNull();
+  });
+
+  it('returns basename for paths outside workspace', () => {
+    expect(resolveProjectFromCwd('/other/path/myapp', ws)).toBe('myapp');
   });
 });

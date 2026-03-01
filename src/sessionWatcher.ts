@@ -12,7 +12,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { parseJsonlLine, extractSessionMeta, extractFirstUserMessage } from './jsonlParser';
+import { parseJsonlLine, extractSessionMeta, extractFirstUserMessage, resolveProjectFromCwd } from './jsonlParser';
 import type { OutputEntry, RemoteSessionInfo } from './types';
 
 const MAX_HISTORY_PER_SESSION = 500;
@@ -27,7 +27,7 @@ export interface SessionWatcherEvents {
 export class SessionWatcher implements vscode.Disposable {
   private watcher: vscode.FileSystemWatcher | null = null;
   private fileOffsets: Map<string, number> = new Map();
-  private sessionMeta: Map<string, { sessionId: string; slug: string; cwd: string; title: string | null }> = new Map();
+  private sessionMeta: Map<string, { sessionId: string; slug: string; cwd: string; title: string | null; inferredProject?: string }> = new Map();
   private sessionHistory: Map<string, Array<{ seq: number; entry: OutputEntry }>> = new Map();
   private seqCounters: Map<string, number> = new Map();
   private events: SessionWatcherEvents;
@@ -354,6 +354,18 @@ export class SessionWatcher implements vscode.Disposable {
       if (seqEntries.length > 0) {
         this.events.onOutput(meta.sessionId, seqEntries);
       }
+
+      // Try to infer project from tool_use paths if still at workspace root
+      if (!meta.inferredProject && this.workspaceCwd) {
+        const wsNorm = this.workspaceCwd.replace(/\/+$/, '');
+        if (meta.cwd.replace(/\/+$/, '') === wsNorm) {
+          const inferred = this.inferProjectFromToolUse(filePath, wsNorm);
+          if (inferred) {
+            meta.inferredProject = inferred;
+            this.emitSessionList();
+          }
+        }
+      }
     } catch {
       // File may have been deleted between stat and read
     }
@@ -373,6 +385,7 @@ export class SessionWatcher implements vscode.Disposable {
         const parsed = JSON.parse(line.trim());
         if (parsed.sessionId === existing.sessionId && parsed.cwd && parsed.cwd !== existing.cwd) {
           existing.cwd = parsed.cwd;
+          existing.inferredProject = undefined;
           // Also update title if we didn't have one yet
           if (!existing.title) {
             const title = extractFirstUserMessage([line]);
@@ -407,6 +420,89 @@ export class SessionWatcher implements vscode.Disposable {
     }
   }
 
+  /**
+   * Infer the project subdirectory from tool_use file paths in a session JSONL.
+   * Scans the first 50 lines for file_path/path inputs that reference a
+   * subdirectory under the workspace root. Returns the most-referenced one.
+   */
+  private inferProjectFromToolUse(filePath: string, wsNorm: string): string | null {
+    try {
+      const lines = this.readFirstLines(filePath, 50);
+      const counts = new Map<string, number>();
+      const prefix = wsNorm + '/';
+
+      for (const line of lines) {
+        try {
+          const parsed = JSON.parse(line);
+          if (parsed.type !== 'assistant') { continue; }
+          const content = parsed.message?.content;
+          if (!Array.isArray(content)) { continue; }
+
+          for (const block of content) {
+            if (block.type !== 'tool_use') { continue; }
+            const input = block.input as Record<string, unknown>;
+
+            // Check file_path (Read/Write/Edit) and path (Glob/Grep)
+            for (const key of ['file_path', 'path']) {
+              const val = typeof input[key] === 'string' ? input[key] as string : '';
+              if (val.startsWith(prefix)) {
+                const seg = val.slice(prefix.length).split('/')[0];
+                if (seg) { counts.set(seg, (counts.get(seg) ?? 0) + 1); }
+              }
+            }
+
+            // Scan Bash command strings for workspace subpaths
+            if (block.name === 'Bash' && typeof input.command === 'string') {
+              let idx = 0;
+              while ((idx = (input.command as string).indexOf(prefix, idx)) !== -1) {
+                const after = (input.command as string).slice(idx + prefix.length);
+                const seg = after.split(/[\s/'"`]/)[0];
+                if (seg) { counts.set(seg, (counts.get(seg) ?? 0) + 1); }
+                idx += prefix.length;
+              }
+            }
+          }
+        } catch { continue; }
+      }
+
+      if (counts.size === 0) { return null; }
+
+      let best = '';
+      let bestCount = 0;
+      for (const [seg, count] of counts) {
+        if (count > bestCount) { best = seg; bestCount = count; }
+      }
+      return best || null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Resolve the display project name for a session.
+   * Tries cwd-based extraction first, then infers from tool_use file paths.
+   */
+  private resolveProjectName(meta: { cwd: string; inferredProject?: string }, filePath: string): string {
+    const resolved = resolveProjectFromCwd(meta.cwd, this.workspaceCwd);
+    if (resolved !== null) { return resolved; }
+
+    // cwd is the workspace root — use cached inference or try now
+    if (meta.inferredProject) { return meta.inferredProject; }
+
+    if (this.workspaceCwd) {
+      const wsNorm = this.workspaceCwd.replace(/\/+$/, '');
+      const inferred = this.inferProjectFromToolUse(filePath, wsNorm);
+      if (inferred) {
+        const cached = this.sessionMeta.get(filePath);
+        if (cached) { cached.inferredProject = inferred; }
+        return inferred;
+      }
+    }
+
+    // Final fallback
+    return path.basename(meta.cwd) || meta.cwd;
+  }
+
   getSessions(): RemoteSessionInfo[] {
     const sessions: RemoteSessionInfo[] = [];
     const now = Date.now();
@@ -425,7 +521,7 @@ export class SessionWatcher implements vscode.Disposable {
           lastActivity: stat.mtime.toISOString(),
           lineCount: this.fileOffsets.get(filePath) ?? 0,
           title: meta.title ?? null,
-          project: path.basename(meta.cwd) || meta.cwd,
+          project: this.resolveProjectName(meta, filePath),
         });
       } catch {
         // File gone

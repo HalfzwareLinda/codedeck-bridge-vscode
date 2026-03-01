@@ -10,6 +10,7 @@
  * We translate these into OutputEntry objects that Codedeck can render.
  */
 
+import * as path from 'path';
 import type { ClaudeJsonlLine, ClaudeContentBlock, OutputEntry } from './types';
 
 /**
@@ -279,4 +280,34 @@ export function extractFirstUserMessage(lines: string[]): string | null {
     } catch { continue; }
   }
   return null;
+}
+
+/**
+ * Compute project name from session cwd relative to workspace root.
+ * Returns the first subdirectory if cwd is deeper than workspace root,
+ * null if cwd IS the workspace root (caller should try inference),
+ * or basename for non-workspace sessions.
+ */
+export function resolveProjectFromCwd(
+  cwd: string,
+  workspaceCwd: string | undefined,
+): string | null {
+  if (!workspaceCwd) {
+    return path.basename(cwd) || cwd;
+  }
+  const wsNorm = workspaceCwd.replace(/\/+$/, '');
+  const cwdNorm = cwd.replace(/\/+$/, '');
+
+  // cwd is deeper than workspace — extract first subdirectory
+  if (cwdNorm.startsWith(wsNorm + '/')) {
+    const relative = cwdNorm.slice(wsNorm.length + 1);
+    const firstSegment = relative.split('/')[0];
+    if (firstSegment) { return firstSegment; }
+  }
+
+  // cwd IS the workspace root — signal that inference is needed
+  if (cwdNorm === wsNorm) { return null; }
+
+  // cwd is outside workspace entirely — use basename
+  return path.basename(cwd) || cwd;
 }
