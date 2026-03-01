@@ -37,9 +37,13 @@ export function activate(context: vscode.ExtensionContext): void {
   let secretKey = loadSecretKey(context);
   if (!secretKey) {
     secretKey = NostrRelay.generateSecretKey();
-    saveSecretKey(context, secretKey).then(undefined, err =>
-      console.error('[Codedeck] Failed to save secret key:', err));
-    console.log('[Codedeck] Generated new bridge keypair');
+    saveSecretKey(context, secretKey).then(
+      () => console.log('[Codedeck] Generated new bridge keypair'),
+      err => {
+        console.error('[Codedeck] Failed to save secret key:', err);
+        vscode.window.showWarningMessage('Codedeck: Failed to persist bridge keypair. Pairings may not survive restart.');
+      },
+    );
   }
 
   // --- Read configuration ---
