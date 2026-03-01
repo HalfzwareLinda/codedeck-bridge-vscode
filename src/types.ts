@@ -77,6 +77,9 @@ export interface HistoryResponseMessage {
   totalEntries: number;
   fromSeq: number;
   toSeq: number;
+  chunkIndex: number;   // 0-based index of this chunk
+  totalChunks: number;  // total number of chunks in this response
+  requestId: string;    // unique ID to correlate chunks from the same request
 }
 
 // --- Union ---

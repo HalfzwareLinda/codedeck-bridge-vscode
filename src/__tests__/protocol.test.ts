@@ -22,9 +22,10 @@ describe('Protocol types', () => {
       expect(SESSION_LIST_EVENT_KIND).toBeLessThan(40000);
     });
 
-    it('output uses regular event kind (< 30000)', () => {
-      expect(OUTPUT_EVENT_KIND).toBe(29515);
-      expect(OUTPUT_EVENT_KIND).toBeLessThan(30000);
+    it('output uses regular event kind (1-9999)', () => {
+      expect(OUTPUT_EVENT_KIND).toBe(4515);
+      expect(OUTPUT_EVENT_KIND).toBeGreaterThanOrEqual(1);
+      expect(OUTPUT_EVENT_KIND).toBeLessThan(10000);
     });
   });
 
@@ -92,6 +93,9 @@ describe('Protocol types', () => {
         totalEntries: 100,
         fromSeq: 1,
         toSeq: 2,
+        chunkIndex: 0,
+        totalChunks: 5,
+        requestId: 'req-abc-123',
       };
 
       const json = JSON.stringify(msg);
@@ -103,6 +107,9 @@ describe('Protocol types', () => {
         expect(parsed.totalEntries).toBe(100);
         expect(parsed.fromSeq).toBe(1);
         expect(parsed.toSeq).toBe(2);
+        expect(parsed.chunkIndex).toBe(0);
+        expect(parsed.totalChunks).toBe(5);
+        expect(parsed.requestId).toBe('req-abc-123');
       }
     });
   });

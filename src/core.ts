@@ -69,6 +69,7 @@ export class BridgeCore {
         }
 
         const totalEntries = this.sessionProvider.getHistoryCount(sessionId);
+        console.log(`[Codedeck] Sending ${entries.length} history entries (total: ${totalEntries}) for ${sessionId}`);
 
         this.relay.publishHistory(phonePubkey, sessionId, entries, totalEntries).catch(err => {
           console.error('[Codedeck] Failed to publish history:', err);

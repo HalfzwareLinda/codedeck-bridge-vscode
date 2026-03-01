@@ -230,8 +230,13 @@ export class NostrRelay {
     }
   }
 
+  private static readonly HISTORY_CHUNK_SIZE = 20;
+  private static readonly MAX_CHUNK_JSON_BYTES = 48_000;
+  private static readonly CHUNK_DELAY_MS = 100;
+
   /**
-   * Send history response to a specific phone.
+   * Send history response to a specific phone, chunked into multiple events
+   * to stay within relay message size limits.
    */
   async publishHistory(
     phonePubkey: string,
@@ -241,39 +246,96 @@ export class NostrRelay {
   ): Promise<void> {
     if (!this.pool) { return; }
 
-    const fromSeq = entries.length > 0 ? entries[0].seq : 0;
-    const toSeq = entries.length > 0 ? entries[entries.length - 1].seq : 0;
+    const requestId = crypto.randomUUID();
+    const chunks = this.splitIntoChunks(entries);
+    const totalChunks = chunks.length;
 
-    const msg: BridgeOutbound = {
-      type: 'history',
-      sessionId,
-      entries,
-      totalEntries,
-      fromSeq,
-      toSeq,
-    };
+    console.log(`[Codedeck] publishHistory: ${entries.length} entries in ${totalChunks} chunks for session ${sessionId}`);
 
-    const json = JSON.stringify(msg);
+    for (let i = 0; i < chunks.length; i++) {
+      if (!this.pool) { return; }
 
-    try {
-      const conversationKey = getConversationKey(this.secretKey, phonePubkey);
-      const ciphertext = encrypt(json, conversationKey);
+      const chunk = chunks[i];
+      const fromSeq = chunk.length > 0 ? chunk[0].seq : 0;
+      const toSeq = chunk.length > 0 ? chunk[chunk.length - 1].seq : 0;
 
-      const event = finalizeEvent({
-        kind: OUTPUT_EVENT_KIND,
-        created_at: Math.floor(Date.now() / 1000),
-        tags: [
-          ['p', phonePubkey],
-          ['s', sessionId],
-          ['t', 'history'], // tag to distinguish history responses
-        ],
-        content: ciphertext,
-      }, this.secretKey);
+      const msg: BridgeOutbound = {
+        type: 'history',
+        sessionId,
+        entries: chunk,
+        totalEntries,
+        fromSeq,
+        toSeq,
+        chunkIndex: i,
+        totalChunks,
+        requestId,
+      };
 
-      await this.pool.publish(this.relays, event);
-    } catch (err) {
-      console.error(`[Codedeck] Failed to publish history:`, err);
+      const json = JSON.stringify(msg);
+
+      try {
+        const conversationKey = getConversationKey(this.secretKey, phonePubkey);
+        const ciphertext = encrypt(json, conversationKey);
+
+        const event = finalizeEvent({
+          kind: OUTPUT_EVENT_KIND,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [
+            ['p', phonePubkey],
+            ['s', sessionId],
+            ['t', 'history'],
+          ],
+          content: ciphertext,
+        }, this.secretKey);
+
+        await this.pool.publish(this.relays, event);
+      } catch (err) {
+        console.error(`[Codedeck] Failed to publish history chunk ${i + 1}/${totalChunks}:`, err);
+      }
+
+      // Delay between chunks to avoid overwhelming relays
+      if (i < chunks.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, NostrRelay.CHUNK_DELAY_MS));
+      }
     }
+  }
+
+  /**
+   * Split entries into chunks, with recursive size checking.
+   */
+  private splitIntoChunks(
+    entries: Array<{ seq: number; entry: OutputEntry }>
+  ): Array<Array<{ seq: number; entry: OutputEntry }>> {
+    const chunks: Array<Array<{ seq: number; entry: OutputEntry }>> = [];
+
+    for (let i = 0; i < entries.length; i += NostrRelay.HISTORY_CHUNK_SIZE) {
+      const slice = entries.slice(i, i + NostrRelay.HISTORY_CHUNK_SIZE);
+      this.splitIfOversized(slice, chunks);
+    }
+
+    // Edge case: 0 entries — send one empty chunk so phone clears loading state
+    if (chunks.length === 0) {
+      chunks.push([]);
+    }
+
+    return chunks;
+  }
+
+  /**
+   * Recursively halve a chunk until it fits within MAX_CHUNK_JSON_BYTES,
+   * or it's a single entry (irreducibly large).
+   */
+  private splitIfOversized(
+    chunk: Array<{ seq: number; entry: OutputEntry }>,
+    out: Array<Array<{ seq: number; entry: OutputEntry }>>,
+  ): void {
+    if (chunk.length <= 1 || JSON.stringify(chunk).length <= NostrRelay.MAX_CHUNK_JSON_BYTES) {
+      out.push(chunk);
+      return;
+    }
+    const mid = Math.ceil(chunk.length / 2);
+    this.splitIfOversized(chunk.slice(0, mid), out);
+    this.splitIfOversized(chunk.slice(mid), out);
   }
 
   private handleIncomingEvent(event: { pubkey: string; content: string }): void {
