@@ -98,19 +98,63 @@ function parseAssistantLine(line: {
         metadata: { role: 'assistant', model: line.message.model },
       });
     } else if (block.type === 'tool_use') {
-      // Format tool call for display
-      const inputStr = formatToolInput(block.name, block.input);
-      entries.push({
-        entryType: 'tool_use',
-        content: inputStr,
-        timestamp: ts,
-        metadata: {
-          role: 'assistant',
-          tool_name: block.name,
-          tool_use_id: block.id,
-          tool_input: block.input,
-        },
-      });
+      if (block.name === 'ExitPlanMode') {
+        // Emit plan content as markdown text entry
+        const input = block.input as Record<string, unknown>;
+        const plan = (input.plan as string) || '';
+        if (plan) {
+          entries.push({
+            entryType: 'text',
+            content: plan,
+            timestamp: ts,
+            metadata: { role: 'assistant', model: line.message.model, special: 'plan', tool_use_id: block.id },
+          });
+        }
+        // Emit plan approval signal
+        entries.push({
+          entryType: 'system',
+          content: 'Plan approval needed',
+          timestamp: ts,
+          metadata: { special: 'plan_approval', tool_use_id: block.id },
+        });
+      } else if (block.name === 'AskUserQuestion') {
+        // Emit each question as an interactive entry
+        const input = block.input as Record<string, unknown>;
+        const questions = (input.questions as Array<{
+          question: string;
+          header?: string;
+          options?: Array<{ label: string; description?: string }>;
+          multiSelect?: boolean;
+        }>) || [];
+        for (const q of questions) {
+          entries.push({
+            entryType: 'system',
+            content: q.question,
+            timestamp: ts,
+            metadata: {
+              special: 'ask_question',
+              tool_use_id: block.id,
+              header: q.header,
+              options: q.options,
+              multiSelect: q.multiSelect,
+            },
+          });
+        }
+      } else {
+        // Format generic tool call for display
+        const inputStr = formatToolInput(block.name, block.input);
+        entries.push({
+          entryType: 'tool_use',
+          content: inputStr,
+          timestamp: ts,
+          metadata: {
+            role: 'assistant',
+            tool_name: block.name,
+            tool_use_id: block.id,
+            tool_input: block.input,
+          },
+        });
+      }
     }
   }
 
