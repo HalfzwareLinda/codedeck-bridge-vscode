@@ -56,10 +56,13 @@ export class BridgeCore {
       },
       onCreateSession: async () => {
         this.log('[Codedeck] Create session request received');
+        const beforeIds = new Set(
+          this.sessionProvider?.getSessions().map(s => s.id) ?? []
+        );
         await this.terminal.createSession();
-        // SessionWatcher will detect the new JSONL file and publish the
-        // updated session list automatically. Don't publish here — the
-        // file doesn't exist yet so getSessions() would return a stale list.
+        // Don't publish here — the JSONL file doesn't exist yet.
+        // Instead, poll until the new session appears and force-publish.
+        this.waitForNewSession(beforeIds);
       },
       onPermissionResponse: (_sessionId, _requestId, _allow) => {
         console.log(`[Codedeck] Permission response received (not yet implemented)`);
@@ -120,6 +123,39 @@ export class BridgeCore {
     this.relay.publishSessionList(sessions).catch(err => {
       console.error('[Codedeck] Failed to publish session list:', err);
     });
+  }
+
+  /**
+   * Poll for a new session to appear after a create-session request.
+   * When found, immediately publish the updated session list so the
+   * phone sees it without waiting for SessionWatcher's debounce/poll.
+   */
+  private waitForNewSession(beforeIds: Set<string>): void {
+    const MAX_ATTEMPTS = 15;
+    const INTERVAL_MS = 1_000;
+    let attempts = 0;
+
+    const check = () => {
+      attempts++;
+      const sessions = this.sessionProvider?.getSessions() ?? [];
+      const newSession = sessions.find(s => !beforeIds.has(s.id));
+
+      if (newSession) {
+        this.log(`[Codedeck] New session detected: ${newSession.slug} (${newSession.id}) — force-publishing session list`);
+        this.onSessionListChanged(sessions);
+        return;
+      }
+
+      if (attempts >= MAX_ATTEMPTS) {
+        this.log(`[Codedeck] Timed out waiting for new session after ${MAX_ATTEMPTS}s`);
+        this.onSessionListChanged(sessions);
+        return;
+      }
+
+      setTimeout(check, INTERVAL_MS);
+    };
+
+    setTimeout(check, INTERVAL_MS);
   }
 
   /** Connect to Nostr relays if phones are paired. */
