@@ -21,6 +21,7 @@ export interface SessionWatcherEvents {
   onOutput: (sessionId: string, entries: Array<{ seq: number; entry: OutputEntry }>) => void;
   onSessionListChanged: (sessions: RemoteSessionInfo[]) => void;
   onNewSession?: (sessionId: string, cwd: string) => void;
+  onExistingSession?: (sessionId: string, cwd: string) => void;
 }
 
 export class SessionWatcher implements vscode.Disposable {
@@ -149,6 +150,11 @@ export class SessionWatcher implements vscode.Disposable {
         if (!this.seqCounters.has(meta.sessionId)) {
           this.loadFullHistory(meta.sessionId);
         }
+      }
+
+      // Notify about existing sessions so TerminalRegistry can map them
+      for (const [, meta] of this.sessionMeta) {
+        this.events.onExistingSession?.(meta.sessionId, meta.cwd);
       }
 
       this.emitSessionList();

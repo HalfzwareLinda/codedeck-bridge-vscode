@@ -119,6 +119,9 @@ export function activate(context: vscode.ExtensionContext): void {
     onNewSession: (sessionId, cwd) => {
       terminalRegistry.onNewSession(sessionId, cwd);
     },
+    onExistingSession: (sessionId, cwd) => {
+      terminalRegistry.mapExistingSession(sessionId, cwd);
+    },
   });
   context.subscriptions.push(sessionWatcher);
   sessionWatcher.start();

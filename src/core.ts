@@ -57,15 +57,9 @@ export class BridgeCore {
       onCreateSession: async () => {
         this.log('[Codedeck] Create session request received');
         await this.terminal.createSession();
-        // Re-publish session list so the phone sees the new session promptly.
-        // SessionWatcher will also trigger onSessionListChanged when it detects
-        // the new JSONL file, but this gives faster feedback.
-        if (this.sessionProvider) {
-          const sessions = this.sessionProvider.getSessions();
-          this.relay.publishSessionList(sessions).catch(err => {
-            console.error('[Codedeck] Failed to publish session list after create:', err);
-          });
-        }
+        // SessionWatcher will detect the new JSONL file and publish the
+        // updated session list automatically. Don't publish here — the
+        // file doesn't exist yet so getSessions() would return a stale list.
       },
       onPermissionResponse: (_sessionId, _requestId, _allow) => {
         console.log(`[Codedeck] Permission response received (not yet implemented)`);

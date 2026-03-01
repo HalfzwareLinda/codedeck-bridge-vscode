@@ -130,6 +130,34 @@ export class TerminalRegistry implements vscode.Disposable {
   }
 
   /**
+   * Called during startup for sessions that already existed before the extension
+   * activated. Matches by cwd basename without the 10-second time constraint.
+   */
+  mapExistingSession(sessionId: string, cwd: string): void {
+    if (this.sessionTerminals.has(sessionId)) { return; }
+
+    const claudeTerminals = findClaudeTerminals();
+    if (claudeTerminals.length === 0) { return; }
+
+    // Single terminal — high confidence match
+    if (claudeTerminals.length === 1) {
+      this.sessionTerminals.set(sessionId, claudeTerminals[0]);
+      return;
+    }
+
+    // Multiple terminals — try matching by cwd basename in terminal name
+    const cwdBasename = cwd.split('/').pop() || '';
+    if (cwdBasename) {
+      for (const t of claudeTerminals) {
+        if (t.name.includes(cwdBasename)) {
+          this.sessionTerminals.set(sessionId, t);
+          return;
+        }
+      }
+    }
+  }
+
+  /**
    * Send text input to a Claude Code terminal.
    *
    * Only sends to a terminal with a confirmed sessionId mapping.
@@ -140,9 +168,12 @@ export class TerminalRegistry implements vscode.Disposable {
     // 1. Try the known terminal for this session
     if (sessionId) {
       const known = this.sessionTerminals.get(sessionId);
-      if (known && findClaudeTerminals().includes(known)) {
+      if (known && known.exitStatus === undefined) {
         known.sendText(text);
         return true;
+      }
+      if (known) {
+        this.sessionTerminals.delete(sessionId); // clean up dead mapping
       }
     }
 
