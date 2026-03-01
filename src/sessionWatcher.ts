@@ -18,8 +18,9 @@ import type { OutputEntry, RemoteSessionInfo } from './types';
 const MAX_HISTORY_PER_SESSION = 500;
 
 export interface SessionWatcherEvents {
-  onOutput: (sessionId: string, entries: OutputEntry[]) => void;
+  onOutput: (sessionId: string, entries: Array<{ seq: number; entry: OutputEntry }>) => void;
   onSessionListChanged: (sessions: RemoteSessionInfo[]) => void;
+  onNewSession?: (sessionId: string, cwd: string) => void;
 }
 
 export class SessionWatcher implements vscode.Disposable {
@@ -141,6 +142,14 @@ export class SessionWatcher implements vscode.Disposable {
           this.indexSession(filePath);
         }
       }
+
+      // Derive seq counters from file content so seq continues across restarts
+      for (const [, meta] of this.sessionMeta) {
+        if (!this.seqCounters.has(meta.sessionId)) {
+          this.loadFullHistory(meta.sessionId);
+        }
+      }
+
       this.emitSessionList();
     } catch (err) {
       console.error('[Codedeck] Error scanning sessions:', err);
@@ -184,6 +193,12 @@ export class SessionWatcher implements vscode.Disposable {
     this.fileOffsets.set(filePath, 0);
     this.indexSession(filePath);
     this.emitSessionList();
+
+    // Notify of new session for terminal correlation
+    const meta = this.sessionMeta.get(filePath);
+    if (meta) {
+      this.events.onNewSession?.(meta.sessionId, meta.cwd);
+    }
 
     // Process any initial content
     this.readNewLines(filePath);
@@ -241,31 +256,34 @@ export class SessionWatcher implements vscode.Disposable {
       const meta = this.sessionMeta.get(filePath);
       if (!meta) { return; }
 
-      // Parse each new line, buffer in history, and emit output entries
+      // Parse each new line, buffer in history with seq, and emit
+      const seqEntries: Array<{ seq: number; entry: OutputEntry }> = [];
+
       for (const line of lines) {
         if (!line.trim()) { continue; }
         const entries = parseJsonlLine(line);
-        if (entries.length > 0) {
-          // Add to history buffer with seq numbers
-          for (const entry of entries) {
-            const seq = (this.seqCounters.get(meta.sessionId) ?? 0) + 1;
-            this.seqCounters.set(meta.sessionId, seq);
+        for (const entry of entries) {
+          const seq = (this.seqCounters.get(meta.sessionId) ?? 0) + 1;
+          this.seqCounters.set(meta.sessionId, seq);
 
-            let history = this.sessionHistory.get(meta.sessionId);
-            if (!history) {
-              history = [];
-              this.sessionHistory.set(meta.sessionId, history);
-            }
-            history.push({ seq, entry });
+          let history = this.sessionHistory.get(meta.sessionId);
+          if (!history) {
+            history = [];
+            this.sessionHistory.set(meta.sessionId, history);
+          }
+          history.push({ seq, entry });
 
-            // Cap history buffer
-            if (history.length > MAX_HISTORY_PER_SESSION) {
-              history.splice(0, history.length - MAX_HISTORY_PER_SESSION);
-            }
+          // Cap history buffer
+          if (history.length > MAX_HISTORY_PER_SESSION) {
+            history.splice(0, history.length - MAX_HISTORY_PER_SESSION);
           }
 
-          this.events.onOutput(meta.sessionId, entries);
+          seqEntries.push({ seq, entry });
         }
+      }
+
+      if (seqEntries.length > 0) {
+        this.events.onOutput(meta.sessionId, seqEntries);
       }
     } catch {
       // File may have been deleted between stat and read
@@ -273,7 +291,7 @@ export class SessionWatcher implements vscode.Disposable {
   }
 
   private pollActiveFiles(): void {
-    for (const filePath of this.fileOffsets.keys()) {
+    for (const filePath of [...this.fileOffsets.keys()]) {
       try {
         const stat = fs.statSync(filePath);
         const offset = this.fileOffsets.get(filePath) ?? 0;
@@ -281,9 +299,15 @@ export class SessionWatcher implements vscode.Disposable {
           this.readNewLines(filePath);
         }
       } catch {
-        // File may have been deleted
+        // File may have been deleted — clean up all maps (mirror onFileDeleted)
+        const meta = this.sessionMeta.get(filePath);
+        if (meta) {
+          this.sessionHistory.delete(meta.sessionId);
+          this.seqCounters.delete(meta.sessionId);
+        }
         this.fileOffsets.delete(filePath);
         this.sessionMeta.delete(filePath);
+        this.emitSessionList();
       }
     }
   }

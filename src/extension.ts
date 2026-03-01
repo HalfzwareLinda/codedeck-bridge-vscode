@@ -16,7 +16,7 @@ import { SessionWatcher } from './sessionWatcher';
 import { NostrRelay } from './nostrRelay';
 import { BridgeCore } from './core';
 import { StatusBar } from './statusBar';
-import { sendToClaudeTerminal, notifyNoTerminal } from './terminalBridge';
+import { TerminalRegistry, notifyNoTerminal } from './terminalBridge';
 import {
   showPairingPanel,
   loadPairedPhones,
@@ -37,7 +37,8 @@ export function activate(context: vscode.ExtensionContext): void {
   let secretKey = loadSecretKey(context);
   if (!secretKey) {
     secretKey = NostrRelay.generateSecretKey();
-    saveSecretKey(context, secretKey);
+    saveSecretKey(context, secretKey).then(undefined, err =>
+      console.error('[Codedeck] Failed to save secret key:', err));
     console.log('[Codedeck] Generated new bridge keypair');
   }
 
@@ -53,11 +54,30 @@ export function activate(context: vscode.ExtensionContext): void {
   statusBar = new StatusBar();
   context.subscriptions.push(statusBar);
 
+  // --- Terminal registry (session-to-terminal mapping) ---
+  const terminalRegistry = new TerminalRegistry();
+  context.subscriptions.push(terminalRegistry);
+
   // --- Core bridge (pure Node.js logic) ---
   bridgeCore = new BridgeCore(
     { secretKey, relays, machineName, pairedPhones },
-    { sendText: sendToClaudeTerminal, notifyNoTerminal },
+    { sendText: (text, sessionId?) => terminalRegistry.sendText(text, sessionId), notifyNoTerminal },
   );
+
+  // Wire connection status to status bar
+  bridgeCore.relay.setConnectionCallback((status, message) => {
+    switch (status) {
+      case 'connected':
+        statusBar?.setReady(loadPairedPhones(context).length);
+        break;
+      case 'disconnected':
+        statusBar?.setOffline();
+        break;
+      case 'error':
+        statusBar?.setError(message ?? 'Connection error');
+        break;
+    }
+  });
 
   // --- Session watcher (VSCode FileSystemWatcher) ---
   sessionWatcher = new SessionWatcher({
@@ -66,6 +86,9 @@ export function activate(context: vscode.ExtensionContext): void {
     },
     onSessionListChanged: (sessions) => {
       bridgeCore?.onSessionListChanged(sessions);
+    },
+    onNewSession: (sessionId, cwd) => {
+      terminalRegistry.onNewSession(sessionId, cwd);
     },
   });
   context.subscriptions.push(sessionWatcher);
@@ -94,7 +117,7 @@ export function activate(context: vscode.ExtensionContext): void {
           relays,
           machine: machineName,
         },
-        (pubkeyInput: string, label: string) => {
+        async (pubkeyInput: string, label: string) => {
           // Decode npub if needed
           let pubkeyHex: string;
           if (pubkeyInput.startsWith('npub1')) {
@@ -129,7 +152,13 @@ export function activate(context: vscode.ExtensionContext): void {
           }
 
           phones.push(phone);
-          savePairedPhones(context, phones);
+          try {
+            await savePairedPhones(context, phones);
+          } catch (err) {
+            console.error('[Codedeck] Failed to save paired phones:', err);
+            vscode.window.showErrorMessage('Codedeck: Failed to save phone pairing');
+            return;
+          }
 
           // Reconnect relay with new phone
           bridgeCore?.relay.updatePairedPhones(phones);
@@ -181,6 +210,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.workspace.onDidChangeConfiguration(e => {
       if (e.affectsConfiguration('codedeck.relays')) {
         const newRelays = vscode.workspace.getConfiguration('codedeck').get<string[]>('relays', ['wss://relay.damus.io', 'wss://nos.lol']);
+        statusBar?.setOffline(); // Transitional state while reconnecting
         bridgeCore?.relay.updateRelays(newRelays);
         console.log('[Codedeck] Relays updated:', newRelays);
       }

@@ -91,7 +91,7 @@ export class BridgeCore {
   }
 
   /** Called when new output is detected from session files. */
-  onSessionOutput(sessionId: string, entries: OutputEntry[]): void {
+  onSessionOutput(sessionId: string, entries: Array<{ seq: number; entry: OutputEntry }>): void {
     this.relay.publishOutput(sessionId, entries).catch(err => {
       console.error('[Codedeck] Failed to publish output:', err);
     });

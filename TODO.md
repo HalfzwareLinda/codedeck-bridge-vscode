@@ -1,15 +1,15 @@
 # Codedeck Bridge TODO
 
-## Known Bugs (from static analysis 2026-03-01)
+## Fixed Bugs (2026-03-01)
 
-- [ ] **Seq counters reset on extension restart** — `sessionWatcher.ts:244`, `nostrRelay.ts:174` — Both seq counters start at 0 on restart. Phone may receive duplicate entries on reconnect. Fix: persist seq counters in `context.globalState` or derive from loaded history.
+- [x] **Seq counters reset on extension restart** — `scanAllSessions()` now calls `loadFullHistory()` at startup to derive seq from file content. Consolidated to single seq source in `sessionWatcher` (removed duplicate counter from `nostrRelay`).
 
-- [ ] **sendToClaudeTerminal ignores sessionId** — `terminalBridge.ts:29-47` — Input always goes to the first Claude terminal found, not the correct one for the session. Fix: implement session-to-terminal mapping (could use terminal name or metadata).
+- [x] **sendToClaudeTerminal ignores sessionId** — Replaced stateless functions with `TerminalRegistry` class. Uses temporal correlation (`onNewSession`) + remembered-terminal strategy for session-to-terminal mapping. Priority chain: known terminal > single terminal > active Claude terminal > first Claude terminal.
 
-- [ ] **savePairedPhones not awaited** — `extension.ts:132` — `savePairedPhones()` returns `Thenable<void>` but is not awaited. If save fails, phones are updated in memory but not persisted. Fix: `await savePairedPhones(context, phones)`.
+- [x] **savePairedPhones not awaited** — Made callback async, added `await` with try-catch error handling. Save failure now prevents relay reconnection and shows error to user.
 
-- [ ] **Status bar not updated after relay config change** — `extension.ts:180-188` — The configuration change watcher updates relays but never reflects connection status back to the status bar. If relay reconnection fails, user still sees "ready".
+- [x] **Status bar not updated after relay config change** — Added `setConnectionCallback()` to `NostrRelay`. Fires `connected`/`disconnected`/`error` events wired to status bar updates. Config change handler sets offline state during reconnection.
 
-- [ ] **Dynamic require() for NIP-44** — `nostrRelay.ts:295-300` — Uses `require('nostr-tools/nip44')` instead of top-level import. Anti-pattern for ESM bundling. Fix: use top-level import.
+- [x] **Dynamic require() for NIP-44** — Added `getConversationKey` to top-level import. Removed `nip44GetConversationKey` wrapper function.
 
-- [ ] **Stale history for deleted sessions** — `sessionWatcher.ts:79-121` — If a session file is deleted between buffer updates, the history remains in memory indefinitely. Fix: periodically prune history for sessions without files.
+- [x] **Stale history for deleted sessions** — `pollActiveFiles()` catch block now extracts sessionId before cleanup, mirrors `onFileDeleted()` pattern. Also emits session list update.

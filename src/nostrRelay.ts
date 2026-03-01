@@ -13,7 +13,7 @@
 
 import { SimplePool } from 'nostr-tools/pool';
 import { getPublicKey, generateSecretKey } from 'nostr-tools/pure';
-import { encrypt, decrypt } from 'nostr-tools/nip44';
+import { encrypt, decrypt, getConversationKey } from 'nostr-tools/nip44';
 import { finalizeEvent } from 'nostr-tools/pure';
 import * as nip19 from 'nostr-tools/nip19';
 import type {
@@ -41,7 +41,8 @@ export class NostrRelay {
   private events: NostrRelayEvents;
   private subscription: ReturnType<SimplePool['subscribeMany']> | null = null;
   private machineName: string;
-  private seqCounters: Map<string, number> = new Map(); // per-session seq counter
+  private onConnectionChange?: (status: 'connected' | 'disconnected' | 'error', message?: string) => void;
+  private reconnecting = false;
 
   constructor(
     secretKey: Uint8Array,
@@ -66,12 +67,14 @@ export class NostrRelay {
     return this.pubkeyHex;
   }
 
-  getSeq(sessionId: string): number {
-    return this.seqCounters.get(sessionId) ?? 0;
+  setConnectionCallback(cb: (status: 'connected' | 'disconnected' | 'error', message?: string) => void): void {
+    this.onConnectionChange = cb;
   }
 
   connect(): void {
+    this.reconnecting = true;
     this.disconnect();
+    this.reconnecting = false;
 
     this.pool = new SimplePool();
 
@@ -79,25 +82,33 @@ export class NostrRelay {
     const phonePubkeys = this.pairedPhones.map(p => p.pubkeyHex);
     if (phonePubkeys.length === 0) {
       console.log('[Codedeck] No paired phones, skipping subscription');
+      this.onConnectionChange?.('disconnected', 'No paired phones');
       return;
     }
 
-    this.subscription = this.pool.subscribeMany(
-      this.relays,
-      // Listen for both output-kind and session-list-kind events from phones
-      { kinds: [OUTPUT_EVENT_KIND, SESSION_LIST_EVENT_KIND], '#p': [this.pubkeyHex], authors: phonePubkeys },
-      {
-        onevent: (event) => {
-          this.handleIncomingEvent(event);
+    try {
+      this.subscription = this.pool.subscribeMany(
+        this.relays,
+        // Listen for both output-kind and session-list-kind events from phones
+        { kinds: [OUTPUT_EVENT_KIND, SESSION_LIST_EVENT_KIND], '#p': [this.pubkeyHex], authors: phonePubkeys },
+        {
+          onevent: (event) => {
+            this.handleIncomingEvent(event);
+          },
+          oneose: () => {
+            console.log('[Codedeck] Connected to relays, subscription active');
+            this.onConnectionChange?.('connected');
+          },
         },
-        oneose: () => {
-          console.log('[Codedeck] Connected to relays, subscription active');
-        },
-      },
-    );
+      );
+    } catch (err) {
+      console.error('[Codedeck] Failed to connect to relays:', err);
+      this.onConnectionChange?.('error', String(err));
+    }
   }
 
   disconnect(): void {
+    const wasConnected = this.isConnected();
     if (this.subscription) {
       this.subscription.close();
       this.subscription = null;
@@ -105,6 +116,9 @@ export class NostrRelay {
     if (this.pool) {
       this.pool.destroy();
       this.pool = null;
+    }
+    if (wasConnected && !this.reconnecting) {
+      this.onConnectionChange?.('disconnected');
     }
   }
 
@@ -144,7 +158,7 @@ export class NostrRelay {
     for (const phone of this.pairedPhones) {
       if (!this.pool) { return; }
       try {
-        const conversationKey = nip44GetConversationKey(this.secretKey, phone.pubkeyHex);
+        const conversationKey = getConversationKey(this.secretKey, phone.pubkeyHex);
         const ciphertext = encrypt(json, conversationKey);
 
         const event = finalizeEvent({
@@ -168,13 +182,10 @@ export class NostrRelay {
    * Publish output entries as regular events with seq counter.
    * Regular kind 29515 events are stored by relays for catch-up.
    */
-  async publishOutput(sessionId: string, entries: OutputEntry[]): Promise<void> {
+  async publishOutput(sessionId: string, entries: Array<{ seq: number; entry: OutputEntry }>): Promise<void> {
     if (!this.pool || this.pairedPhones.length === 0) { return; }
 
-    for (const entry of entries) {
-      const seq = (this.seqCounters.get(sessionId) ?? 0) + 1;
-      this.seqCounters.set(sessionId, seq);
-
+    for (const { seq, entry } of entries) {
       const msg: BridgeOutbound = {
         type: 'output',
         sessionId,
@@ -187,7 +198,7 @@ export class NostrRelay {
       for (const phone of this.pairedPhones) {
         if (!this.pool) { return; }
         try {
-          const conversationKey = nip44GetConversationKey(this.secretKey, phone.pubkeyHex);
+          const conversationKey = getConversationKey(this.secretKey, phone.pubkeyHex);
           const ciphertext = encrypt(json, conversationKey);
 
           const event = finalizeEvent({
@@ -235,7 +246,7 @@ export class NostrRelay {
     const json = JSON.stringify(msg);
 
     try {
-      const conversationKey = nip44GetConversationKey(this.secretKey, phonePubkey);
+      const conversationKey = getConversationKey(this.secretKey, phonePubkey);
       const ciphertext = encrypt(json, conversationKey);
 
       const event = finalizeEvent({
@@ -262,7 +273,7 @@ export class NostrRelay {
 
     try {
       // NIP-44 decrypt
-      const conversationKey = nip44GetConversationKey(this.secretKey, event.pubkey);
+      const conversationKey = getConversationKey(this.secretKey, event.pubkey);
       const plaintext = decrypt(event.content, conversationKey);
       const msg: BridgeInbound = JSON.parse(plaintext);
 
@@ -288,15 +299,4 @@ export class NostrRelay {
   static generateSecretKey(): Uint8Array {
     return generateSecretKey();
   }
-}
-
-/**
- * Derive NIP-44 conversation key.
- * nostr-tools nip44 requires the conversation key to be derived separately.
- */
-function nip44GetConversationKey(sk: Uint8Array, recipientPubkeyHex: string): Uint8Array {
-  const { getConversationKey } = require('nostr-tools/nip44') as {
-    getConversationKey: (sk: Uint8Array, pk: string) => Uint8Array;
-  };
-  return getConversationKey(sk, recipientPubkeyHex);
 }
