@@ -13,6 +13,8 @@ export interface RemoteSessionInfo {
   cwd: string;
   lastActivity: string;
   lineCount: number;
+  title: string | null;
+  project: string;
 }
 
 export interface SessionListMessage {

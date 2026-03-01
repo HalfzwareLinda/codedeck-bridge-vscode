@@ -12,7 +12,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { parseJsonlLine, extractSessionMeta } from './jsonlParser';
+import { parseJsonlLine, extractSessionMeta, extractFirstUserMessage } from './jsonlParser';
 import type { OutputEntry, RemoteSessionInfo } from './types';
 
 const MAX_HISTORY_PER_SESSION = 500;
@@ -26,7 +26,7 @@ export interface SessionWatcherEvents {
 export class SessionWatcher implements vscode.Disposable {
   private watcher: vscode.FileSystemWatcher | null = null;
   private fileOffsets: Map<string, number> = new Map();
-  private sessionMeta: Map<string, { sessionId: string; slug: string; cwd: string }> = new Map();
+  private sessionMeta: Map<string, { sessionId: string; slug: string; cwd: string; title: string | null }> = new Map();
   private sessionHistory: Map<string, Array<{ seq: number; entry: OutputEntry }>> = new Map();
   private seqCounters: Map<string, number> = new Map();
   private events: SessionWatcherEvents;
@@ -176,7 +176,12 @@ export class SessionWatcher implements vscode.Disposable {
       const meta = extractSessionMeta(lines);
 
       if (meta) {
-        this.sessionMeta.set(filePath, meta);
+        // Try to extract title from the initial chunk, fallback to reading more lines
+        let title = extractFirstUserMessage(lines);
+        if (!title) {
+          title = this.extractTitleFromFile(filePath);
+        }
+        this.sessionMeta.set(filePath, { ...meta, title });
         // Set offset to current file size (don't replay old content)
         const stat = fs.statSync(filePath);
         this.fileOffsets.set(filePath, stat.size);
@@ -184,6 +189,20 @@ export class SessionWatcher implements vscode.Disposable {
     } catch {
       // File may be in use or corrupted, skip
     }
+  }
+
+  private extractTitleFromFile(filePath: string): string | null {
+    try {
+      const content = fs.readFileSync(filePath, 'utf8');
+      const lines: string[] = [];
+      let count = 0;
+      for (const line of content.split('\n')) {
+        if (!line.trim()) continue;
+        lines.push(line);
+        if (++count >= 10) break;
+      }
+      return extractFirstUserMessage(lines);
+    } catch { return null; }
   }
 
   private onFileCreated(filePath: string): void {
@@ -249,7 +268,8 @@ export class SessionWatcher implements vscode.Disposable {
       if (!this.sessionMeta.has(filePath)) {
         const meta = extractSessionMeta(lines);
         if (meta) {
-          this.sessionMeta.set(filePath, meta);
+          const title = extractFirstUserMessage(lines) ?? this.extractTitleFromFile(filePath);
+          this.sessionMeta.set(filePath, { ...meta, title });
           this.emitSessionList();
         }
       }
@@ -330,6 +350,8 @@ export class SessionWatcher implements vscode.Disposable {
           cwd: meta.cwd,
           lastActivity: stat.mtime.toISOString(),
           lineCount: this.fileOffsets.get(filePath) ?? 0,
+          title: meta.title ?? null,
+          project: path.basename(meta.cwd) || meta.cwd,
         });
       } catch {
         // File gone

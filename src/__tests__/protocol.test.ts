@@ -31,8 +31,8 @@ describe('Protocol types', () => {
   describe('Bridge outbound messages (bridge → phone)', () => {
     it('serializes session list message', () => {
       const sessions: RemoteSessionInfo[] = [
-        { id: 'sess-1', slug: 'my-project', cwd: '/workspace', lastActivity: '2026-02-09T19:00:00Z', lineCount: 42 },
-        { id: 'sess-2', slug: 'other-proj', cwd: '/other', lastActivity: '2026-02-09T18:00:00Z', lineCount: 10 },
+        { id: 'sess-1', slug: 'my-project', cwd: '/workspace', lastActivity: '2026-02-09T19:00:00Z', lineCount: 42, title: 'Fix the auth bug', project: 'workspace' },
+        { id: 'sess-2', slug: 'other-proj', cwd: '/other', lastActivity: '2026-02-09T18:00:00Z', lineCount: 10, title: null, project: 'other' },
       ];
 
       const msg: SessionListMessage = {

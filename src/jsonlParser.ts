@@ -186,3 +186,27 @@ export function extractSessionMeta(lines: string[]): { sessionId: string; slug: 
   }
   return null;
 }
+
+/**
+ * Extract the first human-written user message from JSONL lines.
+ * Skips IDE-injected context blocks (starting with `<ide_`).
+ * Returns up to 80 chars with newlines replaced by spaces, or null.
+ */
+export function extractFirstUserMessage(lines: string[]): string | null {
+  for (const line of lines) {
+    try {
+      const parsed = JSON.parse(line.trim());
+      if (parsed.type !== 'user') continue;
+      const content = parsed.message?.content;
+      if (!Array.isArray(content)) continue;
+      for (const block of content) {
+        if (block.type === 'text' && block.text && !block.text.startsWith('<ide_')) {
+          const text = block.text.replace(/\n/g, ' ').trim();
+          if (!text) continue;
+          return text.length > 80 ? text.slice(0, 77) + '...' : text;
+        }
+      }
+    } catch { continue; }
+  }
+  return null;
+}
