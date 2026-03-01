@@ -145,7 +145,11 @@ export class NostrRelay {
    * Kind 30515 with d-tag = machine name ensures relays keep only the latest.
    */
   async publishSessionList(sessions: RemoteSessionInfo[]): Promise<void> {
-    if (!this.pool || this.pairedPhones.length === 0) { return; }
+    if (!this.pool || this.pairedPhones.length === 0) {
+      console.log(`[Codedeck] publishSessionList skipped: pool=${!!this.pool}, phones=${this.pairedPhones.length}`);
+      return;
+    }
+    console.log(`[Codedeck] publishSessionList: ${sessions.length} sessions to ${this.pairedPhones.length} phones via ${this.relays.join(', ')}`);
 
     const msg: BridgeOutbound = {
       type: 'sessions',
@@ -171,7 +175,13 @@ export class NostrRelay {
           content: ciphertext,
         }, this.secretKey);
 
-        await this.pool.publish(this.relays, event);
+        console.log(`[Codedeck] Publishing session list event: kind=${event.kind}, content=${ciphertext.length} chars, to ${phone.label} (${phone.pubkeyHex.slice(0, 8)}...)`);
+        const results = this.pool.publish(this.relays, event);
+        for (let i = 0; i < results.length; i++) {
+          results[i]
+            .then((res: unknown) => console.log(`[Codedeck] Relay ${this.relays[i]}: publish OK`, res))
+            .catch((err: unknown) => console.error(`[Codedeck] Relay ${this.relays[i]}: publish FAILED`, err));
+        }
       } catch (err) {
         console.error(`[Codedeck] Failed to publish session list to ${phone.label}:`, err);
       }

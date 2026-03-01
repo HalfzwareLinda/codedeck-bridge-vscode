@@ -75,7 +75,14 @@ export function activate(context: vscode.ExtensionContext): void {
         statusBar?.setReady(loadPairedPhones(context).length);
         // Publish current session list so phones see us immediately
         if (sessionWatcher) {
-          bridgeCore?.onSessionListChanged(sessionWatcher.getSessions());
+          const sessions = sessionWatcher.getSessions();
+          console.log(`[Codedeck] Relay connected — publishing ${sessions.length} sessions`);
+          for (const s of sessions) {
+            console.log(`[Codedeck]   session: ${s.slug} (${s.id})`);
+          }
+          bridgeCore?.onSessionListChanged(sessions);
+        } else {
+          console.log('[Codedeck] Relay connected but sessionWatcher not ready');
         }
         break;
       case 'disconnected':
@@ -206,10 +213,12 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('codedeck.disconnect', () => {
+    vscode.commands.registerCommand('codedeck.disconnect', async () => {
       bridgeCore?.disconnect();
-      statusBar?.setOffline();
-      vscode.window.showInformationMessage('Codedeck: Disconnected from relays');
+      await savePairedPhones(context, []);
+      bridgeCore?.relay.updatePairedPhones([]);
+      statusBar?.setReady(0);
+      vscode.window.showInformationMessage('Codedeck: Disconnected and unpaired all phones');
     }),
   );
 

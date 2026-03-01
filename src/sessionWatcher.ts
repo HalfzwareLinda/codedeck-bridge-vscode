@@ -32,6 +32,7 @@ export class SessionWatcher implements vscode.Disposable {
   private events: SessionWatcherEvents;
   private claudeDir: string;
   private pollInterval: NodeJS.Timeout | null = null;
+  private emitDebounceTimer: NodeJS.Timeout | null = null;
 
   constructor(events: SessionWatcherEvents) {
     this.events = events;
@@ -314,9 +315,15 @@ export class SessionWatcher implements vscode.Disposable {
 
   getSessions(): RemoteSessionInfo[] {
     const sessions: RemoteSessionInfo[] = [];
+    const now = Date.now();
+    const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+    const MAX_SESSIONS = 50;
+
     for (const [filePath, meta] of this.sessionMeta) {
       try {
         const stat = fs.statSync(filePath);
+        // Skip sessions not modified in the last 7 days
+        if (now - stat.mtimeMs > MAX_AGE_MS) { continue; }
         sessions.push({
           id: meta.sessionId,
           slug: meta.slug,
@@ -328,13 +335,18 @@ export class SessionWatcher implements vscode.Disposable {
         // File gone
       }
     }
-    // Sort by last activity, most recent first
+    // Sort by last activity, most recent first — cap to avoid oversized Nostr events
     sessions.sort((a, b) => b.lastActivity.localeCompare(a.lastActivity));
-    return sessions;
+    return sessions.slice(0, MAX_SESSIONS);
   }
 
   private emitSessionList(): void {
-    this.events.onSessionListChanged(this.getSessions());
+    // Debounce: coalesce rapid-fire calls (e.g. during startup scan) into one publish
+    if (this.emitDebounceTimer) { clearTimeout(this.emitDebounceTimer); }
+    this.emitDebounceTimer = setTimeout(() => {
+      this.emitDebounceTimer = null;
+      this.events.onSessionListChanged(this.getSessions());
+    }, 500);
   }
 
   dispose(): void {
@@ -345,6 +357,10 @@ export class SessionWatcher implements vscode.Disposable {
     if (this.pollInterval) {
       clearInterval(this.pollInterval);
       this.pollInterval = null;
+    }
+    if (this.emitDebounceTimer) {
+      clearTimeout(this.emitDebounceTimer);
+      this.emitDebounceTimer = null;
     }
   }
 }
