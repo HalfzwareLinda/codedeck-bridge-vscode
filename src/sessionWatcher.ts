@@ -157,30 +157,79 @@ export class SessionWatcher implements vscode.Disposable {
     }
   }
 
+  /**
+   * Read complete JSONL lines from a file, skipping over huge lines
+   * (e.g. multi-MB file-history-snapshot) without loading them into memory.
+   * Returns up to `maxLines` complete non-empty lines.
+   */
+  private readFirstLines(filePath: string, maxLines: number): string[] {
+    const CHUNK_SIZE = 8192;
+    const MAX_LINE_LEN = 50_000; // skip lines longer than this (snapshots)
+    const lines: string[] = [];
+    let offset = 0;
+    let partial = '';
+
+    const fd = fs.openSync(filePath, 'r');
+    try {
+      const stat = fs.fstatSync(fd);
+      const fileSize = stat.size;
+
+      while (lines.length < maxLines && offset < fileSize) {
+        const buf = Buffer.alloc(CHUNK_SIZE);
+        const bytesRead = fs.readSync(fd, buf, 0, CHUNK_SIZE, offset);
+        if (bytesRead === 0) { break; }
+        offset += bytesRead;
+
+        partial += buf.toString('utf8', 0, bytesRead);
+
+        // Extract complete lines (ending with \n)
+        let nlIdx: number;
+        while ((nlIdx = partial.indexOf('\n')) !== -1) {
+          const line = partial.slice(0, nlIdx).trim();
+          partial = partial.slice(nlIdx + 1);
+
+          if (!line) { continue; }
+          if (line.length > MAX_LINE_LEN) { continue; } // skip huge lines
+          lines.push(line);
+          if (lines.length >= maxLines) { break; }
+        }
+
+        // If partial is growing huge (stuck in a massive line), skip ahead
+        if (partial.length > MAX_LINE_LEN) {
+          // Find the next newline in the file by scanning ahead
+          const skipBuf = Buffer.alloc(CHUNK_SIZE);
+          while (offset < fileSize) {
+            const n = fs.readSync(fd, skipBuf, 0, CHUNK_SIZE, offset);
+            if (n === 0) { break; }
+            const skipStr = skipBuf.toString('utf8', 0, n);
+            const skipNl = skipStr.indexOf('\n');
+            if (skipNl !== -1) {
+              offset += skipNl + 1;
+              partial = '';
+              break;
+            }
+            offset += n;
+          }
+          partial = '';
+        }
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+
+    return lines;
+  }
+
   private indexSession(filePath: string): void {
     // Skip subagent sessions
     if (filePath.includes('/subagents/')) { return; }
 
     try {
-      const fd = fs.openSync(filePath, 'r');
-      const buf = Buffer.alloc(4096);
-      let bytesRead: number;
-      try {
-        bytesRead = fs.readSync(fd, buf, 0, 4096, 0);
-      } finally {
-        fs.closeSync(fd);
-      }
-
-      const chunk = buf.toString('utf8', 0, bytesRead);
-      const lines = chunk.split('\n').filter(l => l.trim());
+      const lines = this.readFirstLines(filePath, 20);
       const meta = extractSessionMeta(lines);
 
       if (meta) {
-        // Try to extract title from the initial chunk, fallback to reading more lines
-        let title = extractFirstUserMessage(lines);
-        if (!title) {
-          title = this.extractTitleFromFile(filePath);
-        }
+        const title = extractFirstUserMessage(lines);
         this.sessionMeta.set(filePath, { ...meta, title });
         // Set offset to current file size (don't replay old content)
         const stat = fs.statSync(filePath);
@@ -189,20 +238,6 @@ export class SessionWatcher implements vscode.Disposable {
     } catch {
       // File may be in use or corrupted, skip
     }
-  }
-
-  private extractTitleFromFile(filePath: string): string | null {
-    try {
-      const content = fs.readFileSync(filePath, 'utf8');
-      const lines: string[] = [];
-      let count = 0;
-      for (const line of content.split('\n')) {
-        if (!line.trim()) continue;
-        lines.push(line);
-        if (++count >= 10) break;
-      }
-      return extractFirstUserMessage(lines);
-    } catch { return null; }
   }
 
   private onFileCreated(filePath: string): void {
@@ -268,7 +303,7 @@ export class SessionWatcher implements vscode.Disposable {
       if (!this.sessionMeta.has(filePath)) {
         const meta = extractSessionMeta(lines);
         if (meta) {
-          const title = extractFirstUserMessage(lines) ?? this.extractTitleFromFile(filePath);
+          const title = extractFirstUserMessage(lines) ?? extractFirstUserMessage(this.readFirstLines(filePath, 20));
           this.sessionMeta.set(filePath, { ...meta, title });
           this.emitSessionList();
         }

@@ -1,5 +1,11 @@
 # Codedeck Bridge TODO
 
+## Low Priority — Relay Hygiene (NIP-40 Expiration)
+
+- [ ] **Add 1-hour expiration to history response events** — `nostrRelay.ts:publishHistory()` — Add `['expiration', ...]` tag to kind 29515 history events (`['t', 'history']`). These are one-shot catch-up payloads, pure waste after delivery. Easiest win.
+
+- [ ] **Add 7-day expiration to output stream events** — `nostrRelay.ts:publishOutput()` — Add `['expiration', ...]` tag to kind 29515 output events. Matches the bridge's own 7-day `MAX_AGE_MS` session filter. Polite to relay operators but relay support for NIP-40 varies.
+
 ## Fixed Bugs (2026-03-01)
 
 - [x] **Seq counters reset on extension restart** — `scanAllSessions()` now calls `loadFullHistory()` at startup to derive seq from file content. Consolidated to single seq source in `sessionWatcher` (removed duplicate counter from `nostrRelay`).

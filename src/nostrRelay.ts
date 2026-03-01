@@ -287,6 +287,8 @@ export class NostrRelay {
       const plaintext = decrypt(event.content, conversationKey);
       const msg: BridgeInbound = JSON.parse(plaintext);
 
+      console.log(`[Codedeck] Received ${msg.type} from ${phone.label} for session ${'sessionId' in msg ? msg.sessionId : 'N/A'}`);
+
       switch (msg.type) {
         case 'input':
           this.events.onInput(msg.sessionId, msg.text);

@@ -90,8 +90,10 @@ export type BridgeMessage = BridgeOutbound | BridgeInbound;
 /** Replaceable event kind for session list (NIP-33 parameterized replaceable: 30000-39999) */
 export const SESSION_LIST_EVENT_KIND = 30515;
 
-/** Regular event kind for output/messages (stored by relays, retrievable for catch-up) */
-export const OUTPUT_EVENT_KIND = 29515;
+/** Regular event kind for output/messages (stored by relays, retrievable for catch-up).
+ *  Must be in range 1-9999 (regular events). Was 29515 which falls in 20000-29999 (ephemeral)
+ *  and caused unreliable delivery — relays dropped events instead of storing/forwarding them. */
+export const OUTPUT_EVENT_KIND = 4515;
 
 // --- Claude Code JSONL types (what we parse from session files) ---
 
