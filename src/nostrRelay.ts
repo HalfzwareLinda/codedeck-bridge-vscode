@@ -4,7 +4,7 @@
  * Protocol:
  * - Session list: NIP-33 replaceable events (kind 30515, d-tag = machine name).
  *   Relays keep only the latest version, so phones always get current session list.
- * - Output: Regular events (kind 29515) with seq counter per session.
+ * - Output: Regular events (kind 4515) with seq counter per session.
  *   Stored by relays, enabling catch-up when phone reconnects.
  * - History: Bridge sends history-response events when phone requests catch-up.
  *
@@ -44,6 +44,16 @@ export class NostrRelay {
   private machineName: string;
   private onConnectionChange?: (status: 'connected' | 'disconnected' | 'error', message?: string) => void;
   private reconnecting = false;
+
+  // --- Output throttling ---
+  // Queue output entries and flush at most once per interval to avoid relay rate-limits.
+  private outputQueue: Array<{ sessionId: string; seq: number; entry: OutputEntry }> = [];
+  private outputFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  private static readonly OUTPUT_FLUSH_INTERVAL_MS = 1_000;
+
+  // --- Session list publish priority ---
+  // Pause output flushing while a session list publish is in progress.
+  private sessionListPublishing = false;
 
   constructor(
     secretKey: Uint8Array,
@@ -117,6 +127,11 @@ export class NostrRelay {
 
   disconnect(): void {
     const wasConnected = this.isConnected();
+    if (this.outputFlushTimer) {
+      clearTimeout(this.outputFlushTimer);
+      this.outputFlushTimer = null;
+    }
+    this.outputQueue.length = 0;
     if (this.subscription) {
       this.subscription.close();
       this.subscription = null;
@@ -151,12 +166,37 @@ export class NostrRelay {
   /**
    * Publish session list as a NIP-33 replaceable event.
    * Kind 30515 with d-tag = machine name ensures relays keep only the latest.
+   *
+   * Pauses output publishing while in progress to avoid relay rate-limits.
+   * Retries once after 3s if all relays reject the publish.
    */
   async publishSessionList(sessions: RemoteSessionInfo[]): Promise<void> {
     if (!this.pool || this.pairedPhones.length === 0) {
       console.log(`[Codedeck] publishSessionList skipped: pool=${!!this.pool}, phones=${this.pairedPhones.length}`);
       return;
     }
+
+    // Pause output flushing so session list gets relay bandwidth priority
+    this.sessionListPublishing = true;
+
+    try {
+      const allFailed = await this.doPublishSessionList(sessions);
+
+      // Retry once after delay if every relay rejected the publish
+      if (allFailed && this.pool) {
+        console.log('[Codedeck] Session list publish failed on all relays — retrying in 3s');
+        await new Promise(resolve => setTimeout(resolve, 3_000));
+        if (this.pool) {
+          await this.doPublishSessionList(sessions);
+        }
+      }
+    } finally {
+      this.sessionListPublishing = false;
+    }
+  }
+
+  /** Internal: publish session list to all phones. Returns true if ALL relays failed. */
+  private async doPublishSessionList(sessions: RemoteSessionInfo[]): Promise<boolean> {
     console.log(`[Codedeck] publishSessionList: ${sessions.length} sessions to ${this.pairedPhones.length} phones via ${this.relays.join(', ')}`);
 
     const msg: BridgeOutbound = {
@@ -166,9 +206,10 @@ export class NostrRelay {
     };
 
     const json = JSON.stringify(msg);
+    let anySuccess = false;
 
     for (const phone of this.pairedPhones) {
-      if (!this.pool) { return; }
+      if (!this.pool) { return !anySuccess; }
       try {
         const conversationKey = getConversationKey(this.secretKey, phone.pubkeyHex);
         const ciphertext = encrypt(json, conversationKey);
@@ -185,25 +226,63 @@ export class NostrRelay {
 
         console.log(`[Codedeck] Publishing session list event: kind=${event.kind}, content=${ciphertext.length} chars, to ${phone.label} (${phone.pubkeyHex.slice(0, 8)}...)`);
         const results = this.pool.publish(this.relays, event);
-        for (let i = 0; i < results.length; i++) {
-          results[i]
-            .then((res: unknown) => console.log(`[Codedeck] Relay ${this.relays[i]}: publish OK`, res))
-            .catch((err: unknown) => console.error(`[Codedeck] Relay ${this.relays[i]}: publish FAILED`, err));
+        const outcomes = await Promise.allSettled(results);
+        for (let i = 0; i < outcomes.length; i++) {
+          if (outcomes[i].status === 'fulfilled') {
+            console.log(`[Codedeck] Relay ${this.relays[i]}: publish OK`);
+            anySuccess = true;
+          } else {
+            console.error(`[Codedeck] Relay ${this.relays[i]}: publish FAILED`, (outcomes[i] as PromiseRejectedResult).reason);
+          }
         }
       } catch (err) {
         console.error(`[Codedeck] Failed to publish session list to ${phone.label}:`, err);
       }
     }
+
+    return !anySuccess;
   }
 
   /**
-   * Publish output entries as regular events with seq counter.
-   * Regular kind 29515 events are stored by relays for catch-up.
+   * Queue output entries for throttled publishing.
+   * Entries are batched and flushed at most once per OUTPUT_FLUSH_INTERVAL_MS
+   * to avoid relay rate-limits. Each entry becomes a separate Nostr event
+   * (preserving per-entry seq numbering) but they're sent in a timed batch.
    */
   async publishOutput(sessionId: string, entries: Array<{ seq: number; entry: OutputEntry }>): Promise<void> {
     if (!this.pool || this.pairedPhones.length === 0) { return; }
 
     for (const { seq, entry } of entries) {
+      this.outputQueue.push({ sessionId, seq, entry });
+    }
+
+    // Start flush timer if not already running
+    if (!this.outputFlushTimer) {
+      this.outputFlushTimer = setTimeout(() => {
+        this.outputFlushTimer = null;
+        this.flushOutputQueue();
+      }, NostrRelay.OUTPUT_FLUSH_INTERVAL_MS);
+    }
+  }
+
+  /** Flush queued output entries to relays. Skipped while session list is publishing. */
+  private flushOutputQueue(): void {
+    // Defer if a session list publish is in progress (give it relay bandwidth)
+    if (this.sessionListPublishing) {
+      if (this.outputQueue.length > 0 && !this.outputFlushTimer) {
+        this.outputFlushTimer = setTimeout(() => {
+          this.outputFlushTimer = null;
+          this.flushOutputQueue();
+        }, NostrRelay.OUTPUT_FLUSH_INTERVAL_MS);
+      }
+      return;
+    }
+
+    if (!this.pool || this.pairedPhones.length === 0 || this.outputQueue.length === 0) { return; }
+
+    const batch = this.outputQueue.splice(0);
+
+    for (const { sessionId, seq, entry } of batch) {
       const msg: BridgeOutbound = {
         type: 'output',
         sessionId,

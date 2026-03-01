@@ -403,6 +403,18 @@ export class SessionWatcher implements vscode.Disposable {
       try {
         const stat = fs.statSync(filePath);
         const offset = this.fileOffsets.get(filePath) ?? 0;
+
+        // Re-attempt indexing for files we track but never got metadata for
+        // (happens when onFileCreated fires on an empty file)
+        if (!this.sessionMeta.has(filePath) && stat.size > 0) {
+          this.indexSession(filePath);
+          if (this.sessionMeta.has(filePath)) {
+            this.emitSessionList();
+            const meta = this.sessionMeta.get(filePath)!;
+            this.events.onNewSession?.(meta.sessionId, meta.cwd);
+          }
+        }
+
         if (stat.size > offset) {
           this.readNewLines(filePath);
         }
@@ -507,7 +519,7 @@ export class SessionWatcher implements vscode.Disposable {
     const sessions: RemoteSessionInfo[] = [];
     const now = Date.now();
     const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
-    const MAX_SESSIONS = 50;
+    const MAX_SESSIONS = 15;
 
     for (const [filePath, meta] of this.sessionMeta) {
       try {
