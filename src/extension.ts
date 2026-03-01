@@ -109,6 +109,7 @@ export function activate(context: vscode.ExtensionContext): void {
   });
 
   // --- Session watcher (VSCode FileSystemWatcher) ---
+  const workspaceCwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   sessionWatcher = new SessionWatcher({
     onOutput: (sessionId, entries) => {
       bridgeCore?.onSessionOutput(sessionId, entries);
@@ -122,7 +123,7 @@ export function activate(context: vscode.ExtensionContext): void {
     onExistingSession: (sessionId, cwd) => {
       terminalRegistry.mapExistingSession(sessionId, cwd);
     },
-  });
+  }, workspaceCwd);
   context.subscriptions.push(sessionWatcher);
   sessionWatcher.start();
 

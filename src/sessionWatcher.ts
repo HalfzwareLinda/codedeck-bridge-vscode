@@ -32,12 +32,14 @@ export class SessionWatcher implements vscode.Disposable {
   private seqCounters: Map<string, number> = new Map();
   private events: SessionWatcherEvents;
   private claudeDir: string;
+  private workspaceCwd: string | undefined;
   private pollInterval: NodeJS.Timeout | null = null;
   private emitDebounceTimer: NodeJS.Timeout | null = null;
 
-  constructor(events: SessionWatcherEvents) {
+  constructor(events: SessionWatcherEvents, workspaceCwd?: string) {
     this.events = events;
     this.claudeDir = path.join(os.homedir(), '.claude', 'projects');
+    this.workspaceCwd = workspaceCwd;
   }
 
   start(): void {
@@ -232,7 +234,7 @@ export class SessionWatcher implements vscode.Disposable {
 
     try {
       const lines = this.readFirstLines(filePath, 20);
-      const meta = extractSessionMeta(lines);
+      const meta = extractSessionMeta(lines, this.workspaceCwd);
 
       if (meta) {
         const title = extractFirstUserMessage(lines);
@@ -250,18 +252,19 @@ export class SessionWatcher implements vscode.Disposable {
     if (!filePath.endsWith('.jsonl')) { return; }
     if (filePath.includes('/subagents/')) { return; }
 
-    // New session file — index it and start from beginning
+    // New session file — index it and start from beginning.
+    // With fallbackCwd, indexSession succeeds even if only queue-operation
+    // lines exist (no cwd yet). If file is truly empty, the 2s poll loop
+    // in pollActiveFiles will pick it up via readNewLines's retry path.
     this.fileOffsets.set(filePath, 0);
     this.indexSession(filePath);
     this.emitSessionList();
 
-    // Notify of new session for terminal correlation
     const meta = this.sessionMeta.get(filePath);
     if (meta) {
       this.events.onNewSession?.(meta.sessionId, meta.cwd);
     }
 
-    // Process any initial content
     this.readNewLines(filePath);
   }
 
@@ -307,12 +310,16 @@ export class SessionWatcher implements vscode.Disposable {
 
       // If we don't have meta for this file yet, try to extract it
       if (!this.sessionMeta.has(filePath)) {
-        const meta = extractSessionMeta(lines);
+        const meta = extractSessionMeta(lines, this.workspaceCwd);
         if (meta) {
           const title = extractFirstUserMessage(lines) ?? extractFirstUserMessage(this.readFirstLines(filePath, 20));
           this.sessionMeta.set(filePath, { ...meta, title });
           this.emitSessionList();
         }
+      } else {
+        // Self-correct: update cwd if a line with the real cwd appears
+        // (initial indexing may have used the workspace fallback)
+        this.maybeUpdateCwd(filePath, lines);
       }
 
       const meta = this.sessionMeta.get(filePath);
@@ -349,6 +356,32 @@ export class SessionWatcher implements vscode.Disposable {
       }
     } catch {
       // File may have been deleted between stat and read
+    }
+  }
+
+  /**
+   * Update the cwd for a session once the real cwd appears in JSONL data.
+   * Called when we initially used the workspace fallback cwd and later
+   * find the real cwd in a user/assistant line.
+   */
+  private maybeUpdateCwd(filePath: string, lines: string[]): void {
+    const existing = this.sessionMeta.get(filePath);
+    if (!existing) { return; }
+
+    for (const line of lines) {
+      try {
+        const parsed = JSON.parse(line.trim());
+        if (parsed.sessionId === existing.sessionId && parsed.cwd && parsed.cwd !== existing.cwd) {
+          existing.cwd = parsed.cwd;
+          // Also update title if we didn't have one yet
+          if (!existing.title) {
+            const title = extractFirstUserMessage([line]);
+            if (title) { existing.title = title; }
+          }
+          this.emitSessionList();
+          return;
+        }
+      } catch { continue; }
     }
   }
 

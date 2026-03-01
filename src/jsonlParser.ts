@@ -212,11 +212,23 @@ function formatToolInput(toolName: string, input: Record<string, unknown>): stri
 /**
  * Extract session metadata from the first few lines of a JSONL file.
  * Returns the session slug, cwd, and sessionId.
+ *
+ * When `fallbackCwd` is provided, returns metadata even if the JSONL lines
+ * only contain `sessionId` (e.g. from `queue-operation` entries that lack
+ * `cwd`). This breaks the deadlock where a new session file exists but
+ * Claude Code hasn't written a user/assistant line yet.
  */
-export function extractSessionMeta(lines: string[]): { sessionId: string; slug: string; cwd: string } | null {
+export function extractSessionMeta(
+  lines: string[],
+  fallbackCwd?: string,
+): { sessionId: string; slug: string; cwd: string } | null {
+  let foundSessionId: string | null = null;
+  let foundSlug: string | null = null;
+
   for (const line of lines) {
     try {
       const parsed = JSON.parse(line.trim());
+      // Best case: both sessionId and cwd present
       if (parsed.sessionId && parsed.cwd) {
         return {
           sessionId: parsed.sessionId,
@@ -224,9 +236,23 @@ export function extractSessionMeta(lines: string[]): { sessionId: string; slug: 
           cwd: parsed.cwd,
         };
       }
+      // Remember sessionId from lines that lack cwd (e.g. queue-operation)
+      if (parsed.sessionId && !foundSessionId) {
+        foundSessionId = parsed.sessionId;
+        foundSlug = parsed.slug || null;
+      }
     } catch {
       continue;
     }
+  }
+
+  // Fallback: sessionId found but no cwd — use fallbackCwd if provided
+  if (foundSessionId && fallbackCwd) {
+    return {
+      sessionId: foundSessionId,
+      slug: foundSlug || foundSessionId.slice(0, 8),
+      cwd: fallbackCwd,
+    };
   }
   return null;
 }

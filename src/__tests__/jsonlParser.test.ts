@@ -300,4 +300,41 @@ describe('extractSessionMeta', () => {
     const meta = extractSessionMeta(lines);
     expect(meta?.sessionId).toBe('sess-1');
   });
+
+  it('returns meta with fallback cwd when only sessionId is present', () => {
+    const lines = [
+      '{"type":"queue-operation","operation":"dequeue","sessionId":"sess-abc","timestamp":"2026-02-09T19:00:00Z"}',
+      '{"type":"file-history-snapshot","messageId":"m1","snapshot":{}}',
+    ];
+
+    const meta = extractSessionMeta(lines, '/fallback/workspace');
+    expect(meta).toEqual({
+      sessionId: 'sess-abc',
+      slug: 'sess-abc',
+      cwd: '/fallback/workspace',
+    });
+  });
+
+  it('returns null without fallback cwd when only sessionId is present', () => {
+    const lines = [
+      '{"type":"queue-operation","operation":"dequeue","sessionId":"sess-abc"}',
+    ];
+
+    const meta = extractSessionMeta(lines);
+    expect(meta).toBeNull();
+  });
+
+  it('prefers real cwd over fallback when both exist in lines', () => {
+    const lines = [
+      '{"type":"queue-operation","operation":"dequeue","sessionId":"sess-abc"}',
+      '{"type":"user","sessionId":"sess-abc","cwd":"/real/path","uuid":"u1","parentUuid":null,"message":{"role":"user","content":[]}}',
+    ];
+
+    const meta = extractSessionMeta(lines, '/fallback/workspace');
+    expect(meta).toEqual({
+      sessionId: 'sess-abc',
+      slug: 'sess-abc',
+      cwd: '/real/path',
+    });
+  });
 });
