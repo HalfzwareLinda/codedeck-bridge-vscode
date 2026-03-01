@@ -57,7 +57,7 @@ export interface PermissionResponseMessage {
 export interface ModeChangeMessage {
   type: 'mode';
   sessionId: string;
-  mode: 'plan' | 'auto' | 'compact';
+  mode: 'plan' | 'auto';
 }
 
 // --- History catch-up (phone → bridge → phone) ---

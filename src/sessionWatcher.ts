@@ -154,8 +154,12 @@ export class SessionWatcher implements vscode.Disposable {
     try {
       const fd = fs.openSync(filePath, 'r');
       const buf = Buffer.alloc(4096);
-      const bytesRead = fs.readSync(fd, buf, 0, 4096, 0);
-      fs.closeSync(fd);
+      let bytesRead: number;
+      try {
+        bytesRead = fs.readSync(fd, buf, 0, 4096, 0);
+      } finally {
+        fs.closeSync(fd);
+      }
 
       const chunk = buf.toString('utf8', 0, bytesRead);
       const lines = chunk.split('\n').filter(l => l.trim());
@@ -214,8 +218,11 @@ export class SessionWatcher implements vscode.Disposable {
       const fd = fs.openSync(filePath, 'r');
       const newSize = stat.size - offset;
       const buf = Buffer.alloc(newSize);
-      fs.readSync(fd, buf, 0, newSize, offset);
-      fs.closeSync(fd);
+      try {
+        fs.readSync(fd, buf, 0, newSize, offset);
+      } finally {
+        fs.closeSync(fd);
+      }
 
       this.fileOffsets.set(filePath, stat.size);
 

@@ -9,6 +9,7 @@
  */
 
 import * as vscode from 'vscode';
+import QRCode from 'qrcode-svg';
 import type { PairingInfo, PairedPhone } from './types';
 
 /**
@@ -47,6 +48,21 @@ export function showPairingPanel(
   return panel;
 }
 
+function generateQrSvg(content: string): string {
+  const qr = new QRCode({
+    content,
+    padding: 4,
+    width: 256,
+    height: 256,
+    color: '#000000',
+    background: '#ffffff',
+    ecl: 'M',
+    join: true,
+    container: 'svg-viewbox',
+  });
+  return qr.svg();
+}
+
 function getPairingHtml(pairingUrl: string, info: PairingInfo): string {
   return `<!DOCTYPE html>
 <html>
@@ -64,18 +80,14 @@ function getPairingHtml(pairingUrl: string, info: PairingInfo): string {
     }
     h1 { font-size: 1.4em; margin-bottom: 8px; }
     .info { opacity: 0.7; font-size: 0.9em; margin-bottom: 20px; text-align: center; }
-    .qr-placeholder {
+    .qr-container {
       width: 256px;
       height: 256px;
-      border: 2px dashed var(--vscode-editorWidget-border);
-      display: flex;
-      align-items: center;
-      justify-content: center;
       margin: 20px 0;
-      font-size: 0.85em;
-      text-align: center;
-      padding: 10px;
+      border-radius: 8px;
+      overflow: hidden;
     }
+    .qr-container svg { width: 100%; height: 100%; }
     .url-box {
       background: var(--vscode-textBlockQuote-background);
       border: 1px solid var(--vscode-editorWidget-border);
@@ -115,10 +127,8 @@ function getPairingHtml(pairingUrl: string, info: PairingInfo): string {
   <h1>Pair Codedeck Phone</h1>
   <p class="info">Scan this with the Codedeck app, or copy the pairing URL below.</p>
 
-  <div class="qr-placeholder">
-    QR code generation requires a library.<br>
-    For now, copy the pairing URL below<br>
-    or use manual pairing.
+  <div class="qr-container">
+    ${generateQrSvg(pairingUrl)}
   </div>
 
   <p><strong>Pairing URL:</strong></p>

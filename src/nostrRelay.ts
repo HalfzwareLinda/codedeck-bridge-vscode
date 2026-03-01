@@ -28,7 +28,7 @@ import { SESSION_LIST_EVENT_KIND, OUTPUT_EVENT_KIND } from './types';
 export interface NostrRelayEvents {
   onInput: (sessionId: string, text: string) => void;
   onPermissionResponse: (sessionId: string, requestId: string, allow: boolean) => void;
-  onModeChange: (sessionId: string, mode: 'plan' | 'auto' | 'compact') => void;
+  onModeChange: (sessionId: string, mode: 'plan' | 'auto') => void;
   onHistoryRequest: (sessionId: string, afterSeq: number | undefined, phonePubkey: string) => void;
 }
 
@@ -142,6 +142,7 @@ export class NostrRelay {
     const json = JSON.stringify(msg);
 
     for (const phone of this.pairedPhones) {
+      if (!this.pool) { return; }
       try {
         const conversationKey = nip44GetConversationKey(this.secretKey, phone.pubkeyHex);
         const ciphertext = encrypt(json, conversationKey);
@@ -184,6 +185,7 @@ export class NostrRelay {
       const json = JSON.stringify(msg);
 
       for (const phone of this.pairedPhones) {
+        if (!this.pool) { return; }
         try {
           const conversationKey = nip44GetConversationKey(this.secretKey, phone.pubkeyHex);
           const ciphertext = encrypt(json, conversationKey);

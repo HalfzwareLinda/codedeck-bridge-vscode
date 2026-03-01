@@ -69,6 +69,7 @@
     "vitest": "^4.0.18"
   },
   "dependencies": {
-    "nostr-tools": "^2.23.1"
+    "nostr-tools": "^2.23.1",
+    "qrcode-svg": "^1.1.0"
   }
 }
