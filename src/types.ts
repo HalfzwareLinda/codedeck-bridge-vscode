@@ -82,10 +82,16 @@ export interface HistoryResponseMessage {
   requestId: string;    // unique ID to correlate chunks from the same request
 }
 
+// --- Session creation (phone → bridge) ---
+
+export interface CreateSessionMessage {
+  type: 'create-session';
+}
+
 // --- Union ---
 
 export type BridgeOutbound = SessionListMessage | OutputMessage | HistoryResponseMessage;
-export type BridgeInbound = InputMessage | PermissionResponseMessage | ModeChangeMessage | HistoryRequestMessage;
+export type BridgeInbound = InputMessage | PermissionResponseMessage | ModeChangeMessage | HistoryRequestMessage | CreateSessionMessage;
 export type BridgeMessage = BridgeOutbound | BridgeInbound;
 
 // --- Nostr event kinds ---

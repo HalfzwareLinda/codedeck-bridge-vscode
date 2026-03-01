@@ -22,7 +22,8 @@ export interface BridgeCoreConfig {
 }
 
 export interface TerminalSender {
-  sendText: (text: string, sessionId?: string) => boolean;
+  sendText: (text: string, sessionId?: string) => Promise<boolean>;
+  createSession: () => Promise<void>;
   notifyNoTerminal: () => void;
 }
 
@@ -46,11 +47,24 @@ export class BridgeCore {
     this.terminal = terminal;
 
     const relayEvents: NostrRelayEvents = {
-      onInput: (sessionId, text) => {
+      onInput: async (sessionId, text) => {
         console.log(`[Codedeck] Input for session ${sessionId}: ${text.slice(0, 50)}...`);
-        const sent = this.terminal.sendText(text, sessionId);
+        const sent = await this.terminal.sendText(text, sessionId);
         if (!sent) {
           this.terminal.notifyNoTerminal();
+        }
+      },
+      onCreateSession: async () => {
+        console.log('[Codedeck] Create session request received');
+        await this.terminal.createSession();
+        // Re-publish session list so the phone sees the new session promptly.
+        // SessionWatcher will also trigger onSessionListChanged when it detects
+        // the new JSONL file, but this gives faster feedback.
+        if (this.sessionProvider) {
+          const sessions = this.sessionProvider.getSessions();
+          this.relay.publishSessionList(sessions).catch(err => {
+            console.error('[Codedeck] Failed to publish session list after create:', err);
+          });
         }
       },
       onPermissionResponse: (_sessionId, _requestId, _allow) => {

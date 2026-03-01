@@ -65,7 +65,11 @@ export function activate(context: vscode.ExtensionContext): void {
   // --- Core bridge (pure Node.js logic) ---
   bridgeCore = new BridgeCore(
     { secretKey, relays, machineName, pairedPhones },
-    { sendText: (text, sessionId?) => terminalRegistry.sendText(text, sessionId), notifyNoTerminal },
+    {
+      sendText: (text, sessionId?) => terminalRegistry.sendText(text, sessionId),
+      createSession: () => terminalRegistry.createSession(),
+      notifyNoTerminal,
+    },
   );
 
   // Wire connection status to status bar

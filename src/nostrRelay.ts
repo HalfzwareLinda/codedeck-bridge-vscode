@@ -30,6 +30,7 @@ export interface NostrRelayEvents {
   onPermissionResponse: (sessionId: string, requestId: string, allow: boolean) => void;
   onModeChange: (sessionId: string, mode: 'plan' | 'auto') => void;
   onHistoryRequest: (sessionId: string, afterSeq: number | undefined, phonePubkey: string) => void;
+  onCreateSession: () => void;
 }
 
 export class NostrRelay {
@@ -353,7 +354,8 @@ export class NostrRelay {
 
       switch (msg.type) {
         case 'input':
-          this.events.onInput(msg.sessionId, msg.text);
+          Promise.resolve(this.events.onInput(msg.sessionId, msg.text))
+            .catch(err => console.error('[Codedeck] onInput handler error:', err));
           break;
         case 'permission-res':
           this.events.onPermissionResponse(msg.sessionId, msg.requestId, msg.allow);
@@ -363,6 +365,10 @@ export class NostrRelay {
           break;
         case 'history-request':
           this.events.onHistoryRequest(msg.sessionId, msg.afterSeq, event.pubkey);
+          break;
+        case 'create-session':
+          Promise.resolve(this.events.onCreateSession())
+            .catch(err => console.error('[Codedeck] onCreateSession handler error:', err));
           break;
       }
     } catch (err) {

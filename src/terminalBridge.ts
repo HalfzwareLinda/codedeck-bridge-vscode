@@ -7,6 +7,15 @@
  * TerminalRegistry tracks the lifecycle of Claude terminals and correlates
  * them with sessions using temporal proximity and a "remembered terminal"
  * strategy for multi-terminal scenarios.
+ *
+ * When no Claude terminal exists, we auto-open one via the official
+ * claude-vscode.terminal.open command to preserve workspace context
+ * (CLAUDE.md, settings, MCP config).
+ *
+ * Text is only sent to terminals with a confirmed sessionId mapping.
+ * When no mapping exists, a new terminal is opened and the text is
+ * queued until Claude Code initializes and SessionWatcher correlates
+ * the new JSONL session with the terminal.
  */
 
 import * as vscode from 'vscode';
@@ -23,11 +32,11 @@ export function findClaudeTerminals(): vscode.Terminal[] {
 }
 
 /**
- * Show a notification if no Claude Code terminal is found.
+ * Show a notification when auto-open fails (e.g., Claude Code extension not installed).
  */
 export function notifyNoTerminal(): void {
   vscode.window.showWarningMessage(
-    'Codedeck: No Claude Code terminal found. Start a Claude Code session in the terminal first.',
+    'Codedeck: Could not open a Claude Code terminal. Is the Claude Code extension installed?',
   );
 }
 
@@ -38,6 +47,13 @@ export function listTerminals(): string[] {
   return vscode.window.terminals.map(t => t.name);
 }
 
+/** Pending input that is waiting for a session-to-terminal mapping. */
+interface PendingInput {
+  text: string;
+  sessionId: string;
+  timestamp: number;
+}
+
 /**
  * Manages session-to-terminal mappings using temporal correlation and
  * remembered-terminal strategy.
@@ -46,6 +62,10 @@ export class TerminalRegistry implements vscode.Disposable {
   private sessionTerminals: Map<string, vscode.Terminal> = new Map();
   private recentTerminals: Array<{ terminal: vscode.Terminal; openedAt: number }> = [];
   private disposables: vscode.Disposable[] = [];
+  private autoOpenInProgress = false;
+  /** Input queued while waiting for Claude Code to initialize after auto-open. */
+  private pendingInputs: PendingInput[] = [];
+  private static readonly PENDING_INPUT_TIMEOUT_MS = 30_000;
 
   constructor() {
     this.disposables.push(
@@ -74,6 +94,8 @@ export class TerminalRegistry implements vscode.Disposable {
   /**
    * Called when a new session file is detected. Tries to associate it with
    * a recently opened Claude terminal using temporal proximity.
+   *
+   * Also flushes any pending input queued for that session.
    */
   onNewSession(sessionId: string, cwd: string): void {
     if (this.sessionTerminals.has(sessionId)) { return; }
@@ -83,75 +105,117 @@ export class TerminalRegistry implements vscode.Disposable {
     this.recentTerminals = this.recentTerminals.filter(r => (now - r.openedAt) < 30_000);
     const candidates = this.recentTerminals.filter(r => (now - r.openedAt) < 10_000);
 
+    let matched: vscode.Terminal | null = null;
+
     if (candidates.length === 1) {
       // Only one recent Claude terminal — high confidence match
-      this.sessionTerminals.set(sessionId, candidates[0].terminal);
-      return;
-    }
-
-    // Try matching by cwd basename in terminal name
-    const cwdBasename = cwd.split('/').pop() || '';
-    if (cwdBasename) {
-      for (const c of candidates) {
-        if (c.terminal.name.includes(cwdBasename)) {
-          this.sessionTerminals.set(sessionId, c.terminal);
-          return;
+      matched = candidates[0].terminal;
+    } else {
+      // Try matching by cwd basename in terminal name
+      const cwdBasename = cwd.split('/').pop() || '';
+      if (cwdBasename) {
+        for (const c of candidates) {
+          if (c.terminal.name.includes(cwdBasename)) {
+            matched = c.terminal;
+            break;
+          }
         }
       }
+    }
+
+    if (matched) {
+      this.sessionTerminals.set(sessionId, matched);
+      this.flushPendingInputs(sessionId, matched);
     }
   }
 
   /**
    * Send text input to a Claude Code terminal.
    *
-   * Priority chain:
-   * 1. Known terminal for this sessionId (proactive or remembered)
-   * 2. Single Claude terminal (common case)
-   * 3. Active terminal if it's a Claude terminal (multi-terminal)
-   * 4. First Claude terminal (fallback)
-   * 5. Any active terminal (last resort)
+   * Only sends to a terminal with a confirmed sessionId mapping.
+   * If no mapping exists, opens a new Claude Code terminal and queues
+   * the text until SessionWatcher correlates the session.
    */
-  sendText(text: string, sessionId?: string): boolean {
-    const terminals = findClaudeTerminals();
-
-    if (terminals.length === 0) {
-      const activeTerminal = vscode.window.activeTerminal;
-      if (activeTerminal) {
-        activeTerminal.sendText(text);
-        if (sessionId) { this.sessionTerminals.set(sessionId, activeTerminal); }
-        return true;
-      }
-      return false;
-    }
-
+  async sendText(text: string, sessionId?: string): Promise<boolean> {
     // 1. Try the known terminal for this session
     if (sessionId) {
       const known = this.sessionTerminals.get(sessionId);
-      if (known && terminals.includes(known)) {
+      if (known && findClaudeTerminals().includes(known)) {
         known.sendText(text);
         return true;
       }
     }
 
-    // 2. Single terminal — use it
-    if (terminals.length === 1) {
-      terminals[0].sendText(text);
-      if (sessionId) { this.sessionTerminals.set(sessionId, terminals[0]); }
+    // 2. No mapped terminal — open a new one and queue the text
+    if (sessionId) {
+      this.pendingInputs.push({ text, sessionId, timestamp: Date.now() });
+      this.prunePendingInputs();
+      await this.ensureClaudeTerminal();
       return true;
     }
 
-    // 3. Multiple terminals — prefer the active one if it's a Claude terminal
-    const active = vscode.window.activeTerminal;
-    if (active && terminals.includes(active)) {
-      active.sendText(text);
-      if (sessionId) { this.sessionTerminals.set(sessionId, active); }
-      return true;
+    // 3. No sessionId at all — can't safely route
+    return false;
+  }
+
+  /**
+   * Open a new Claude Code terminal session via the official extension command.
+   * Used when the phone requests a new session.
+   */
+  async createSession(): Promise<void> {
+    await this.ensureClaudeTerminal();
+  }
+
+  /**
+   * Open a Claude Code terminal if one isn't already being opened.
+   * Guards against concurrent opens from rapid messages.
+   */
+  private async ensureClaudeTerminal(): Promise<void> {
+    if (this.autoOpenInProgress) { return; }
+
+    this.autoOpenInProgress = true;
+    try {
+      await vscode.commands.executeCommand('claude-vscode.terminal.open');
+      // Don't send text here — wait for SessionWatcher to detect the new
+      // JSONL session and call onNewSession(), which flushes pending inputs.
+    } catch (err) {
+      console.error('[Codedeck] Failed to open Claude Code terminal:', err);
+    } finally {
+      this.autoOpenInProgress = false;
+    }
+  }
+
+  /**
+   * Flush queued inputs for a session once its terminal mapping is established.
+   */
+  private flushPendingInputs(sessionId: string, terminal: vscode.Terminal): void {
+    const now = Date.now();
+    const toSend: PendingInput[] = [];
+    const remaining: PendingInput[] = [];
+
+    for (const pending of this.pendingInputs) {
+      if (pending.sessionId === sessionId && (now - pending.timestamp) < TerminalRegistry.PENDING_INPUT_TIMEOUT_MS) {
+        toSend.push(pending);
+      } else if ((now - pending.timestamp) < TerminalRegistry.PENDING_INPUT_TIMEOUT_MS) {
+        remaining.push(pending);
+      }
+      // else: expired, drop silently
     }
 
-    // 4. Fallback — first Claude terminal
-    terminals[0].sendText(text);
-    if (sessionId) { this.sessionTerminals.set(sessionId, terminals[0]); }
-    return true;
+    this.pendingInputs = remaining;
+
+    for (const { text } of toSend) {
+      console.log(`[Codedeck] Flushing pending input to session ${sessionId}: ${text.slice(0, 50)}...`);
+      terminal.sendText(text);
+    }
+  }
+
+  /**
+   * Remove expired pending inputs.
+   */
+  private prunePendingInputs(): void {
+    const cutoff = Date.now() - TerminalRegistry.PENDING_INPUT_TIMEOUT_MS;
+    this.pendingInputs = this.pendingInputs.filter(p => p.timestamp > cutoff);
   }
 
   private isClaudeTerminal(terminal: vscode.Terminal): boolean {
