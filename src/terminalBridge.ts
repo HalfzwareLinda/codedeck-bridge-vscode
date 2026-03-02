@@ -168,7 +168,8 @@ export class TerminalRegistry implements vscode.Disposable {
     if (sessionId) {
       const known = this.sessionTerminals.get(sessionId);
       if (known && known.exitStatus === undefined) {
-        known.sendText(text + '\r', false);
+        console.log(`[Codedeck] sendText delivered to terminal for session ${sessionId}: ${text.slice(0, 50)}...`);
+        known.sendText(text);
         return true;
       }
       if (known) {
@@ -178,6 +179,7 @@ export class TerminalRegistry implements vscode.Disposable {
 
     // 2. No mapped terminal — queue for potential future match, inform caller
     if (sessionId) {
+      console.log(`[Codedeck] sendText QUEUED (no terminal mapping) for session ${sessionId}: ${text.slice(0, 50)}...`);
       this.pendingInputs.push({ text, sessionId, timestamp: Date.now() });
       this.prunePendingInputs();
       return false;
@@ -276,14 +278,17 @@ export class TerminalRegistry implements vscode.Disposable {
       } else if ((now - pending.timestamp) < TerminalRegistry.PENDING_INPUT_TIMEOUT_MS) {
         remaining.push(pending);
       }
-      // else: expired, drop silently
+      // else: expired, drop
+      else {
+        console.log(`[Codedeck] Pending input EXPIRED for session ${pending.sessionId}: ${pending.text.slice(0, 50)}...`);
+      }
     }
 
     this.pendingInputs = remaining;
 
     for (const { text } of toSend) {
       console.log(`[Codedeck] Flushing pending input to session ${sessionId}: ${text.slice(0, 50)}...`);
-      terminal.sendText(text + '\r', false);
+      terminal.sendText(text);
     }
   }
 
