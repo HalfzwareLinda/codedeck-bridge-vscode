@@ -68,17 +68,17 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(terminalRegistry);
 
   // --- Core bridge (pure Node.js logic) ---
+  const workspaceCwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   bridgeCore = new BridgeCore(
-    { secretKey, relays, machineName, pairedPhones },
+    { secretKey, relays, machineName, pairedPhones, workspaceCwd },
     {
       sendText: (text, sessionId?) => terminalRegistry.sendText(text, sessionId),
-      createSession: async (pendingId?) => {
-        log(`[Codedeck] Opening Claude Code terminal...${pendingId ? ` (pendingId=${pendingId})` : ''}`);
-        await terminalRegistry.createSession(pendingId);
-        log('[Codedeck] Claude Code terminal opened');
+      createSession: (sessionId, cwd?) => {
+        log(`[Codedeck] Spawning Claude Code terminal with session-id=${sessionId}`);
+        terminalRegistry.createSession(sessionId, cwd);
+        log(`[Codedeck] Claude Code terminal spawned for ${sessionId}`);
       },
       notifyNoTerminal,
-      clearPendingId: (pendingId) => terminalRegistry.clearPendingId(pendingId),
     },
     log,
   );
@@ -110,7 +110,6 @@ export function activate(context: vscode.ExtensionContext): void {
   });
 
   // --- Session watcher (VSCode FileSystemWatcher) ---
-  const workspaceCwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   sessionWatcher = new SessionWatcher({
     onOutput: (sessionId, entries) => {
       bridgeCore?.onSessionOutput(sessionId, entries);
@@ -120,8 +119,8 @@ export function activate(context: vscode.ExtensionContext): void {
       bridgeCore?.onSessionListChanged(sessions);
     },
     onNewSession: (sessionId, cwd) => {
-      const pendingId = terminalRegistry.onNewSession(sessionId, cwd);
-      bridgeCore?.onNewSession(sessionId, cwd, pendingId);
+      terminalRegistry.onNewSession(sessionId, cwd);
+      bridgeCore?.onNewSession(sessionId, cwd);
     },
     onExistingSession: (sessionId, cwd) => {
       terminalRegistry.mapExistingSession(sessionId, cwd);

@@ -4,18 +4,14 @@
  * Claude Code runs in VSCode terminals. We detect which terminal is running
  * Claude Code and send user input from the phone to that terminal.
  *
- * TerminalRegistry tracks the lifecycle of Claude terminals and correlates
- * them with sessions using temporal proximity and a "remembered terminal"
- * strategy for multi-terminal scenarios.
+ * TerminalRegistry tracks the lifecycle of Claude terminals and maps
+ * sessionId → terminal for input routing.
  *
- * When no Claude terminal exists, we auto-open one via the official
- * claude-vscode.terminal.open command to preserve workspace context
- * (CLAUDE.md, settings, MCP config).
+ * Phone-initiated sessions use direct spawning with `claude --session-id <uuid>`
+ * so the sessionId is known immediately — no detection chain needed.
  *
- * Text is only sent to terminals with a confirmed sessionId mapping.
- * When no mapping exists, a new terminal is opened and the text is
- * queued until Claude Code initializes and SessionWatcher correlates
- * the new JSONL session with the terminal.
+ * Manually opened Claude terminals are still detected via onDidOpenTerminal
+ * and correlated with sessions through SessionWatcher's onNewSession callback.
  */
 
 import * as vscode from 'vscode';
@@ -40,13 +36,6 @@ export function notifyNoTerminal(): void {
   );
 }
 
-/**
- * Get a list of terminal names for debugging/display.
- */
-export function listTerminals(): string[] {
-  return vscode.window.terminals.map(t => t.name);
-}
-
 /** Pending input that is waiting for a session-to-terminal mapping. */
 interface PendingInput {
   text: string;
@@ -55,25 +44,18 @@ interface PendingInput {
 }
 
 /**
- * Manages session-to-terminal mappings using temporal correlation and
- * remembered-terminal strategy.
+ * Manages session-to-terminal mappings. Phone-initiated sessions use
+ * deterministic mapping via createSession(); manually opened terminals
+ * use temporal proximity matching.
  */
 export class TerminalRegistry implements vscode.Disposable {
   private sessionTerminals: Map<string, vscode.Terminal> = new Map();
   private recentTerminals: Array<{ terminal: vscode.Terminal; openedAt: number }> = [];
   private disposables: vscode.Disposable[] = [];
   private autoOpenInProgress = false;
-  /** Input queued while waiting for Claude Code to initialize after auto-open. */
+  /** Input queued while waiting for a session-to-terminal mapping. */
   private pendingInputs: PendingInput[] = [];
   private static readonly PENDING_INPUT_TIMEOUT_MS = 30_000;
-
-  // --- Two-phase pending session tracking ---
-  /** pendingId to assign to the next Claude terminal that opens. */
-  private nextPendingId: string | null = null;
-  /** Maps pendingId → terminal (for matching JSONL sessions to pending requests). */
-  private pendingTerminals: Map<string, vscode.Terminal> = new Map();
-  /** Expiry timer for nextPendingId — clears stale mapping if onDidOpenTerminal doesn't fire. */
-  private nextPendingExpiry: ReturnType<typeof setTimeout> | null = null;
 
   constructor() {
     this.disposables.push(
@@ -83,16 +65,6 @@ export class TerminalRegistry implements vscode.Disposable {
           // Keep only last 30 seconds of recent terminals
           const cutoff = Date.now() - 30_000;
           this.recentTerminals = this.recentTerminals.filter(r => r.openedAt > cutoff);
-
-          // Consume nextPendingId — only for Claude terminals (v2 guard)
-          if (this.nextPendingId) {
-            this.pendingTerminals.set(this.nextPendingId, terminal);
-            this.nextPendingId = null;
-            if (this.nextPendingExpiry) {
-              clearTimeout(this.nextPendingExpiry);
-              this.nextPendingExpiry = null;
-            }
-          }
         }
       }),
       vscode.window.onDidCloseTerminal(terminal => {
@@ -113,27 +85,15 @@ export class TerminalRegistry implements vscode.Disposable {
    * Called when a new session file is detected. Tries to associate it with
    * a recently opened Claude terminal using temporal proximity.
    *
+   * For phone-spawned sessions, the mapping is already set via createSession()
+   * so this is mainly for manually opened terminals.
+   *
    * Also flushes any pending input queued for that session.
    */
-  onNewSession(sessionId: string, cwd: string): string | undefined {
-    if (this.sessionTerminals.has(sessionId)) { return undefined; }
+  onNewSession(sessionId: string, cwd: string): void {
+    if (this.sessionTerminals.has(sessionId)) { return; }
 
-    // 1. Check pendingTerminals first — strongest signal (deterministic match)
-    for (const [pendingId, terminal] of this.pendingTerminals) {
-      // Match by cwd: the terminal's working directory should match the session's cwd
-      // Since VSCode terminals don't reliably expose cwd, we match by cwd basename in terminal name
-      const cwdBasename = cwd.split('/').pop() || '';
-      const nameMatch = cwdBasename && terminal.name.includes(cwdBasename);
-      // If only one pending terminal, it's a high-confidence match regardless of name
-      if (this.pendingTerminals.size === 1 || nameMatch) {
-        this.sessionTerminals.set(sessionId, terminal);
-        this.pendingTerminals.delete(pendingId);
-        this.flushPendingInputs(sessionId, terminal);
-        return pendingId;
-      }
-    }
-
-    // 2. Fall back to temporal proximity (existing logic)
+    // Temporal proximity matching for manually opened terminals
     const now = Date.now();
     this.recentTerminals = this.recentTerminals.filter(r => (now - r.openedAt) < 30_000);
     const candidates = this.recentTerminals.filter(r => (now - r.openedAt) < 10_000);
@@ -158,7 +118,6 @@ export class TerminalRegistry implements vscode.Disposable {
       this.sessionTerminals.set(sessionId, matched);
       this.flushPendingInputs(sessionId, matched);
     }
-    return undefined;
   }
 
   /**
@@ -222,33 +181,27 @@ export class TerminalRegistry implements vscode.Disposable {
   }
 
   /**
-   * Open a new Claude Code terminal session via the official extension command.
-   * Used when the phone requests a new session.
+   * Spawn a new Claude Code terminal with a specific session ID.
+   * Uses direct `claude --session-id <uuid>` spawning so the sessionId
+   * is known immediately — no detection chain needed.
    *
-   * @param pendingId If provided, the next Claude terminal that opens will be
-   *   mapped to this pendingId in `pendingTerminals`. A 5s expiry timer prevents
-   *   stale mappings if `onDidOpenTerminal` doesn't fire.
+   * The terminal ↔ sessionId mapping is set deterministically at creation time.
    */
-  async createSession(pendingId?: string): Promise<void> {
-    if (pendingId) {
-      this.nextPendingId = pendingId;
-      // 5s expiry — clear nextPendingId if onDidOpenTerminal hasn't consumed it
-      if (this.nextPendingExpiry) { clearTimeout(this.nextPendingExpiry); }
-      this.nextPendingExpiry = setTimeout(() => {
-        if (this.nextPendingId === pendingId) {
-          this.nextPendingId = null;
-        }
-        this.nextPendingExpiry = null;
-      }, 5_000);
-    }
-    await this.ensureClaudeTerminal();
-  }
+  createSession(sessionId: string, cwd?: string): vscode.Terminal {
+    const args = ['--session-id', sessionId, '--ide'];
 
-  /**
-   * Remove a pendingId from the pending tracking (called after session-ready is published).
-   */
-  clearPendingId(pendingId: string): void {
-    this.pendingTerminals.delete(pendingId);
+    const terminal = vscode.window.createTerminal({
+      name: `Claude Code (${sessionId.slice(0, 8)})`,
+      shellPath: 'claude',
+      shellArgs: args,
+      cwd: cwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+    });
+
+    // Deterministic mapping — no heuristics needed
+    this.sessionTerminals.set(sessionId, terminal);
+    terminal.show();
+
+    return terminal;
   }
 
   /**

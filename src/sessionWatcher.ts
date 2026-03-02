@@ -36,9 +36,6 @@ export class SessionWatcher implements vscode.Disposable {
   private pollInterval: NodeJS.Timeout | null = null;
   private emitDebounceTimer: NodeJS.Timeout | null = null;
   private pollCount = 0;
-  private fastScanInterval: NodeJS.Timeout | null = null;
-  private fastScanTimeout: NodeJS.Timeout | null = null;
-
   private static readonly NEW_FILE_SCAN_EVERY_N_POLLS = 3; // scan for new files every 3rd poll (every 6s)
 
   constructor(events: SessionWatcherEvents, workspaceCwd?: string) {
@@ -626,46 +623,6 @@ export class SessionWatcher implements vscode.Disposable {
     return sessions.slice(0, MAX_SESSIONS);
   }
 
-  /** Return ALL indexed session IDs (no cap). */
-  getAllSessionIds(): string[] {
-    return [...this.sessionMeta.values()].map(m => m.sessionId);
-  }
-
-  /**
-   * Find the newest indexed session whose ID is not in `excludeIds`.
-   * Searches ALL sessionMeta entries (no 15-cap), so detection works
-   * regardless of how many sessions exist.
-   */
-  findNewSessionNotIn(excludeIds: Set<string>): RemoteSessionInfo | null {
-    let newest: { info: RemoteSessionInfo; mtimeMs: number } | null = null;
-    let candidateCount = 0;
-
-    for (const [filePath, meta] of this.sessionMeta) {
-      if (excludeIds.has(meta.sessionId)) { continue; }
-      candidateCount++;
-      try {
-        const stat = fs.statSync(filePath);
-        const info: RemoteSessionInfo = {
-          id: meta.sessionId,
-          slug: meta.slug,
-          cwd: meta.cwd,
-          lastActivity: stat.mtime.toISOString(),
-          lineCount: this.fileOffsets.get(filePath) ?? 0,
-          title: meta.title ?? null,
-          project: this.resolveProjectName(meta, filePath),
-        };
-        if (!newest || stat.mtimeMs > newest.mtimeMs) {
-          newest = { info, mtimeMs: stat.mtimeMs };
-        }
-      } catch {
-        // File gone
-      }
-    }
-
-    console.log(`[Codedeck] findNewSessionNotIn: ${this.sessionMeta.size} total, ${excludeIds.size} excluded, ${candidateCount} candidates, result=${newest?.info.id.slice(0, 8) ?? 'none'}`);
-    return newest?.info ?? null;
-  }
-
   private emitSessionList(): void {
     // Debounce: coalesce rapid-fire calls (e.g. during startup scan) into one publish
     if (this.emitDebounceTimer) { clearTimeout(this.emitDebounceTimer); }
@@ -673,38 +630,6 @@ export class SessionWatcher implements vscode.Disposable {
       this.emitDebounceTimer = null;
       this.events.onSessionListChanged(this.getSessions());
     }, 500);
-  }
-
-  /**
-   * Temporarily scan for new files every `intervalMs` (default 1s).
-   * Used during pending session creation for rapid detection.
-   * Auto-stops after `maxDurationMs` (default 30s).
-   */
-  startFastScan(intervalMs = 1000, maxDurationMs = 30_000): void {
-    if (this.fastScanInterval) {
-      console.log(`[Codedeck] Fast scan already running, skipping`);
-      return;
-    }
-    console.log(`[Codedeck] Starting fast scan (every ${intervalMs}ms, up to ${maxDurationMs / 1000}s), claudeDir=${this.claudeDir}`);
-    let scanCount = 0;
-    this.fastScanInterval = setInterval(() => {
-      scanCount++;
-      console.log(`[Codedeck] Fast scan #${scanCount}: scanning ${this.claudeDir} (${this.sessionMeta.size} sessions indexed, ${this.fileOffsets.size} files tracked)`);
-      this.scanForNewFiles();
-    }, intervalMs);
-    this.fastScanTimeout = setTimeout(() => this.stopFastScan(), maxDurationMs);
-  }
-
-  stopFastScan(): void {
-    if (this.fastScanInterval) {
-      console.log(`[Codedeck] Stopping fast scan`);
-      clearInterval(this.fastScanInterval);
-      this.fastScanInterval = null;
-    }
-    if (this.fastScanTimeout) {
-      clearTimeout(this.fastScanTimeout);
-      this.fastScanTimeout = null;
-    }
   }
 
   dispose(): void {
@@ -720,6 +645,5 @@ export class SessionWatcher implements vscode.Disposable {
       clearTimeout(this.emitDebounceTimer);
       this.emitDebounceTimer = null;
     }
-    this.stopFastScan();
   }
 }
