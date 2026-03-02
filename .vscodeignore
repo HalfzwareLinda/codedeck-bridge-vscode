@@ -1,6 +1,10 @@
-src/**
 .gitignore
+.git/**
+src/**
 tsconfig.json
 **/*.ts
-!out/**/*.js
-node_modules/.package-lock.json
+!out/**
+node_modules/**
+CLAUDE.md
+TODO.md
+*.vsix
