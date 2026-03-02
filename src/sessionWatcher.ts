@@ -12,7 +12,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { parseJsonlLine, extractSessionMeta, extractFirstUserMessage, resolveProjectFromCwd } from './jsonlParser';
+import { parseJsonlLine, extractSessionMeta, extractFirstUserMessage, resolveProjectFromCwd, extractPermissionMode, toolNeedsPermission } from './jsonlParser';
 import type { OutputEntry, RemoteSessionInfo } from './types';
 
 const MAX_HISTORY_PER_SESSION = 500;
@@ -30,6 +30,7 @@ export class SessionWatcher implements vscode.Disposable {
   private sessionMeta: Map<string, { sessionId: string; slug: string; cwd: string; title: string | null; inferredProject?: string }> = new Map();
   private sessionHistory: Map<string, Array<{ seq: number; entry: OutputEntry }>> = new Map();
   private seqCounters: Map<string, number> = new Map();
+  private permissionModes: Map<string, string> = new Map();
   private events: SessionWatcherEvents;
   private claudeDir: string;
   private workspaceCwd: string | undefined;
@@ -103,13 +104,30 @@ export class SessionWatcher implements vscode.Disposable {
       const entries: Array<{ seq: number; entry: OutputEntry }> = [];
       let seq = 0;
 
+      // Parse all lines first, then collect resolved tool IDs to suppress
+      // permission cards for tools that already have results (all of them in history).
+      let currentMode = this.permissionModes.get(sessionId) ?? 'default';
+      const allParsed: OutputEntry[] = [];
       for (const line of lines) {
         if (!line.trim()) { continue; }
-        const parsed = parseJsonlLine(line);
-        for (const entry of parsed) {
-          seq++;
-          entries.push({ seq, entry });
+        const mode = extractPermissionMode(line);
+        if (mode) { currentMode = mode; }
+        allParsed.push(...parseJsonlLine(line));
+      }
+      this.permissionModes.set(sessionId, currentMode);
+
+      const resolvedIds = new Set<string>();
+      for (const entry of allParsed) {
+        if (entry.entryType === 'tool_result') {
+          const id = entry.metadata?.tool_use_id as string | undefined;
+          if (id) { resolvedIds.add(id); }
         }
+      }
+
+      const withPermissions = this.injectPermissionRequests(allParsed, currentMode, resolvedIds);
+      for (const entry of withPermissions) {
+        seq++;
+        entries.push({ seq, entry });
       }
 
       // Cap to max history
@@ -328,35 +346,71 @@ export class SessionWatcher implements vscode.Disposable {
         // Self-correct: update cwd if a line with the real cwd appears
         // (initial indexing may have used the workspace fallback)
         this.maybeUpdateCwd(filePath, lines);
+
+        // Back-fill title if still null (phone-spawned sessions are indexed before
+        // the user types their first message, so title is initially null)
+        const existingMeta = this.sessionMeta.get(filePath);
+        if (existingMeta && !existingMeta.title) {
+          const title = extractFirstUserMessage(lines);
+          if (title) {
+            existingMeta.title = title;
+            this.emitSessionList();
+          }
+        }
       }
 
       const meta = this.sessionMeta.get(filePath);
       if (!meta) { return; }
 
-      // Parse each new line, buffer in history with seq, and emit
-      const seqEntries: Array<{ seq: number; entry: OutputEntry }> = [];
+      // Two-pass approach: parse all lines first, then inject permission_request
+      // entries only for tool_use calls whose tool_result is NOT already in the
+      // same batch. This avoids flashing a permission card for auto-approved tools.
 
+      // Pass 1: parse all lines, track permissionMode
+      const batchEntries: OutputEntry[] = [];
       for (const line of lines) {
         if (!line.trim()) { continue; }
-        const entries = parseJsonlLine(line);
-        for (const entry of entries) {
-          const seq = (this.seqCounters.get(meta.sessionId) ?? 0) + 1;
-          this.seqCounters.set(meta.sessionId, seq);
 
-          let history = this.sessionHistory.get(meta.sessionId);
-          if (!history) {
-            history = [];
-            this.sessionHistory.set(meta.sessionId, history);
-          }
-          history.push({ seq, entry });
-
-          // Cap history buffer
-          if (history.length > MAX_HISTORY_PER_SESSION) {
-            history.splice(0, history.length - MAX_HISTORY_PER_SESSION);
-          }
-
-          seqEntries.push({ seq, entry });
+        const mode = extractPermissionMode(line);
+        if (mode) {
+          this.permissionModes.set(meta.sessionId, mode);
         }
+
+        const entries = parseJsonlLine(line);
+        batchEntries.push(...entries);
+      }
+
+      // Collect tool_use_ids that already have a tool_result in this batch
+      const resolvedInBatch = new Set<string>();
+      for (const entry of batchEntries) {
+        if (entry.entryType === 'tool_result') {
+          const id = entry.metadata?.tool_use_id as string | undefined;
+          if (id) { resolvedInBatch.add(id); }
+        }
+      }
+
+      // Pass 2: inject permission_request entries, skipping already-resolved tools
+      const currentMode = this.permissionModes.get(meta.sessionId) ?? 'default';
+      const withPermissions = this.injectPermissionRequests(batchEntries, currentMode, resolvedInBatch);
+
+      const seqEntries: Array<{ seq: number; entry: OutputEntry }> = [];
+      for (const entry of withPermissions) {
+        const seq = (this.seqCounters.get(meta.sessionId) ?? 0) + 1;
+        this.seqCounters.set(meta.sessionId, seq);
+
+        let history = this.sessionHistory.get(meta.sessionId);
+        if (!history) {
+          history = [];
+          this.sessionHistory.set(meta.sessionId, history);
+        }
+        history.push({ seq, entry });
+
+        // Cap history buffer
+        if (history.length > MAX_HISTORY_PER_SESSION) {
+          history.splice(0, history.length - MAX_HISTORY_PER_SESSION);
+        }
+
+        seqEntries.push({ seq, entry });
       }
 
       if (seqEntries.length > 0) {
@@ -406,6 +460,43 @@ export class SessionWatcher implements vscode.Disposable {
     }
   }
 
+  /**
+   * For each tool_use entry that needs permission under the current mode,
+   * append a permission_request system entry right after it.
+   *
+   * `resolvedIds` contains tool_use_ids that already have a matching
+   * tool_result in the same batch — these are auto-approved and should
+   * not generate a permission card on the phone.
+   */
+  private injectPermissionRequests(
+    entries: OutputEntry[],
+    permissionMode: string,
+    resolvedIds: Set<string> = new Set(),
+  ): OutputEntry[] {
+    const result: OutputEntry[] = [];
+    for (const entry of entries) {
+      result.push(entry);
+      if (entry.entryType === 'tool_use') {
+        const toolName = (entry.metadata?.tool_name as string) ?? '';
+        const toolUseId = (entry.metadata?.tool_use_id as string) ?? '';
+        if (toolName && toolNeedsPermission(toolName, permissionMode) && !resolvedIds.has(toolUseId)) {
+          result.push({
+            entryType: 'system',
+            content: entry.content, // e.g. "Bash: git status"
+            timestamp: entry.timestamp,
+            metadata: {
+              special: 'permission_request',
+              tool_name: toolName,
+              tool_use_id: entry.metadata?.tool_use_id,
+              tool_input: entry.metadata?.tool_input,
+            },
+          });
+        }
+      }
+    }
+    return result;
+  }
+
   private pollActiveFiles(): void {
     this.pollCount++;
     if (this.pollCount % SessionWatcher.NEW_FILE_SCAN_EVERY_N_POLLS === 0) {
@@ -425,6 +516,19 @@ export class SessionWatcher implements vscode.Disposable {
             this.emitSessionList();
             const meta = this.sessionMeta.get(filePath)!;
             this.events.onNewSession?.(meta.sessionId, meta.cwd);
+          }
+        }
+
+        // Back-fill title for sessions indexed before the first user message
+        if (this.sessionMeta.has(filePath)) {
+          const meta = this.sessionMeta.get(filePath)!;
+          if (!meta.title && stat.size > 0) {
+            const lines = this.readFirstLines(filePath, 40);
+            const title = extractFirstUserMessage(lines);
+            if (title) {
+              meta.title = title;
+              this.emitSessionList();
+            }
           }
         }
 

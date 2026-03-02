@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseJsonlLine, extractSessionMeta, resolveProjectFromCwd } from '../jsonlParser';
+import { parseJsonlLine, extractSessionMeta, resolveProjectFromCwd, extractPermissionMode, toolNeedsPermission } from '../jsonlParser';
 
 describe('parseJsonlLine', () => {
   it('returns empty for empty input', () => {
@@ -428,5 +428,79 @@ describe('resolveProjectFromCwd', () => {
 
   it('returns basename for paths outside workspace', () => {
     expect(resolveProjectFromCwd('/other/path/myapp', ws)).toBe('myapp');
+  });
+});
+
+describe('extractPermissionMode', () => {
+  it('extracts permissionMode from user entries', () => {
+    const line = JSON.stringify({
+      type: 'user',
+      uuid: 'u1',
+      sessionId: 's1',
+      cwd: '/w',
+      permissionMode: 'bypassPermissions',
+      message: { role: 'user', content: [{ type: 'text', text: 'hi' }] },
+    });
+    expect(extractPermissionMode(line)).toBe('bypassPermissions');
+  });
+
+  it('returns undefined for non-user entries', () => {
+    const line = JSON.stringify({ type: 'assistant', uuid: 'a1', sessionId: 's1', cwd: '/w', message: { role: 'assistant', content: [] } });
+    expect(extractPermissionMode(line)).toBeUndefined();
+  });
+
+  it('returns undefined for user entries without permissionMode', () => {
+    const line = JSON.stringify({ type: 'user', uuid: 'u1', sessionId: 's1', cwd: '/w', message: { role: 'user', content: [] } });
+    expect(extractPermissionMode(line)).toBeUndefined();
+  });
+
+  it('returns undefined for invalid JSON', () => {
+    expect(extractPermissionMode('not json')).toBeUndefined();
+  });
+
+  it('extracts all known permission modes', () => {
+    for (const mode of ['default', 'plan', 'acceptEdits', 'bypassPermissions']) {
+      const line = JSON.stringify({ type: 'user', uuid: 'u1', permissionMode: mode, message: { role: 'user', content: [] } });
+      expect(extractPermissionMode(line)).toBe(mode);
+    }
+  });
+});
+
+describe('toolNeedsPermission', () => {
+  it('requires permission for Bash/Edit/Write/NotebookEdit in default mode', () => {
+    expect(toolNeedsPermission('Bash', 'default')).toBe(true);
+    expect(toolNeedsPermission('Edit', 'default')).toBe(true);
+    expect(toolNeedsPermission('Write', 'default')).toBe(true);
+    expect(toolNeedsPermission('NotebookEdit', 'default')).toBe(true);
+  });
+
+  it('does not require permission for read-only tools in default mode', () => {
+    expect(toolNeedsPermission('Read', 'default')).toBe(false);
+    expect(toolNeedsPermission('Glob', 'default')).toBe(false);
+    expect(toolNeedsPermission('Grep', 'default')).toBe(false);
+    expect(toolNeedsPermission('WebSearch', 'default')).toBe(false);
+  });
+
+  it('only requires permission for Bash in acceptEdits mode', () => {
+    expect(toolNeedsPermission('Bash', 'acceptEdits')).toBe(true);
+    expect(toolNeedsPermission('Edit', 'acceptEdits')).toBe(false);
+    expect(toolNeedsPermission('Write', 'acceptEdits')).toBe(false);
+    expect(toolNeedsPermission('NotebookEdit', 'acceptEdits')).toBe(false);
+  });
+
+  it('requires no permission in bypassPermissions mode', () => {
+    expect(toolNeedsPermission('Bash', 'bypassPermissions')).toBe(false);
+    expect(toolNeedsPermission('Edit', 'bypassPermissions')).toBe(false);
+    expect(toolNeedsPermission('Write', 'bypassPermissions')).toBe(false);
+  });
+
+  it('returns false for unknown permission modes', () => {
+    expect(toolNeedsPermission('Bash', 'unknownMode')).toBe(false);
+  });
+
+  it('plan mode matches default mode', () => {
+    expect(toolNeedsPermission('Bash', 'plan')).toBe(true);
+    expect(toolNeedsPermission('Edit', 'plan')).toBe(true);
+    expect(toolNeedsPermission('Read', 'plan')).toBe(false);
   });
 });

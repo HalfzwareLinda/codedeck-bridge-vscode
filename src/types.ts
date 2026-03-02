@@ -54,6 +54,8 @@ export interface PermissionResponseMessage {
   sessionId: string;
   requestId: string;
   allow: boolean;
+  /** Optional modifier: 'always' → always allow this tool, 'never' → don't ask again (deny). */
+  modifier?: 'always' | 'never';
 }
 
 export interface ModeChangeMessage {
@@ -94,6 +96,20 @@ export interface RefreshSessionsMessage {
   type: 'refresh-sessions';
 }
 
+// --- Image upload (phone → bridge, chunked) ---
+
+export interface UploadImageMessage {
+  type: 'upload-image';
+  sessionId: string;
+  uploadId: string;
+  filename: string;
+  mimeType: string;
+  base64Data: string;
+  text: string;
+  chunkIndex: number;
+  totalChunks: number;
+}
+
 // --- Two-phase session creation (bridge → phone) ---
 
 export interface SessionPendingMessage {
@@ -118,7 +134,7 @@ export interface SessionFailedMessage {
 // --- Union ---
 
 export type BridgeOutbound = SessionListMessage | OutputMessage | HistoryResponseMessage | SessionPendingMessage | SessionReadyMessage | SessionFailedMessage;
-export type BridgeInbound = InputMessage | PermissionResponseMessage | ModeChangeMessage | HistoryRequestMessage | CreateSessionMessage | RefreshSessionsMessage;
+export type BridgeInbound = InputMessage | PermissionResponseMessage | ModeChangeMessage | HistoryRequestMessage | CreateSessionMessage | RefreshSessionsMessage | UploadImageMessage;
 export type BridgeMessage = BridgeOutbound | BridgeInbound;
 
 // --- Nostr event kinds ---

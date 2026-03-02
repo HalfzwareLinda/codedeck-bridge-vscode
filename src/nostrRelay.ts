@@ -30,11 +30,12 @@ import { SESSION_LIST_EVENT_KIND, OUTPUT_EVENT_KIND } from './types';
 
 export interface NostrRelayEvents {
   onInput: (sessionId: string, text: string) => void;
-  onPermissionResponse: (sessionId: string, requestId: string, allow: boolean) => void;
+  onPermissionResponse: (sessionId: string, requestId: string, allow: boolean, modifier?: 'always' | 'never') => void;
   onModeChange: (sessionId: string, mode: 'plan' | 'auto') => void;
   onHistoryRequest: (sessionId: string, afterSeq: number | undefined, phonePubkey: string) => void;
   onCreateSession: () => void;
   onRefreshSessions: () => void;
+  onUploadImage: (sessionId: string, uploadId: string, filename: string, mimeType: string, base64Data: string, text: string, chunkIndex: number, totalChunks: number) => void;
 }
 
 export class NostrRelay {
@@ -663,7 +664,7 @@ export class NostrRelay {
             .catch(err => console.error('[Codedeck] onInput handler error:', err));
           break;
         case 'permission-res':
-          this.events.onPermissionResponse(msg.sessionId, msg.requestId, msg.allow);
+          this.events.onPermissionResponse(msg.sessionId, msg.requestId, msg.allow, msg.modifier);
           break;
         case 'mode':
           this.events.onModeChange(msg.sessionId, msg.mode);
@@ -678,6 +679,12 @@ export class NostrRelay {
         case 'refresh-sessions':
           Promise.resolve(this.events.onRefreshSessions())
             .catch(err => this.log(`[Codedeck] onRefreshSessions handler error: ${err}`));
+          break;
+        case 'upload-image':
+          this.events.onUploadImage(
+            msg.sessionId, msg.uploadId, msg.filename, msg.mimeType,
+            msg.base64Data, msg.text, msg.chunkIndex, msg.totalChunks,
+          );
           break;
       }
     } catch (err) {

@@ -13,6 +13,33 @@
 import * as path from 'path';
 import type { ClaudeJsonlLine, ClaudeContentBlock, OutputEntry } from './types';
 
+// --- Permission detection ---
+
+/** Tools that require user permission in each permission mode. */
+const PERMISSION_TOOLS: Record<string, Set<string>> = {
+  default: new Set(['Bash', 'Edit', 'Write', 'NotebookEdit']),
+  plan: new Set(['Bash', 'Edit', 'Write', 'NotebookEdit']),
+  acceptEdits: new Set(['Bash']),
+  bypassPermissions: new Set(),
+};
+
+/** Extract the permissionMode field from a raw JSONL line (only present on user entries). */
+export function extractPermissionMode(line: string): string | undefined {
+  try {
+    const parsed = JSON.parse(line.trim());
+    if (parsed.type === 'user' && typeof parsed.permissionMode === 'string') {
+      return parsed.permissionMode;
+    }
+  } catch { /* ignore parse errors */ }
+  return undefined;
+}
+
+/** Check whether a tool requires user permission under the given permission mode. */
+export function toolNeedsPermission(toolName: string, permissionMode: string): boolean {
+  const tools = PERMISSION_TOOLS[permissionMode];
+  return tools ? tools.has(toolName) : false;
+}
+
 /**
  * Parse a single JSONL line into zero or more OutputEntry objects.
  * Returns empty array for lines we don't relay (snapshots, queue ops, progress).

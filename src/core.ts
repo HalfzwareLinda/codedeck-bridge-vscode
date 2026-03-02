@@ -11,6 +11,8 @@
  * (chokidar for file watching, child_process for terminal I/O).
  */
 
+import * as fs from 'fs';
+import * as path from 'path';
 import { NostrRelay, NostrRelayEvents } from './nostrRelay';
 import type { OutputEntry, RemoteSessionInfo, PairedPhone } from './types';
 
@@ -41,11 +43,24 @@ export interface SessionProvider {
  * Core bridge that wires up Nostr relay ↔ session data ↔ terminal I/O.
  * Does not depend on VSCode APIs.
  */
+interface ImageUploadTracker {
+  sessionId: string;
+  filename: string;
+  mimeType: string;
+  text: string;
+  totalChunks: number;
+  received: Map<number, string>;
+  timeoutId: ReturnType<typeof setTimeout>;
+}
+
 export class BridgeCore {
+  private static readonly IMAGE_ASSEMBLY_TIMEOUT_MS = 60_000;
+
   public readonly relay: NostrRelay;
   private terminal: TerminalSender;
   private sessionProvider: SessionProvider | null = null;
   private workspaceCwd: string;
+  private imageChunks: Map<string, ImageUploadTracker> = new Map();
 
   constructor(config: BridgeCoreConfig, terminal: TerminalSender, private log: (msg: string) => void = console.log) {
     this.terminal = terminal;
@@ -99,8 +114,22 @@ export class BridgeCore {
           await this.relay.publishSessionFailed(sessionId, 'terminal-failed');
         }
       },
-      onPermissionResponse: (_sessionId, _requestId, _allow) => {
-        console.log(`[Codedeck] Permission response received (not yet implemented)`);
+      onPermissionResponse: async (sessionId, _requestId, allow, modifier) => {
+        // Map to Claude Code's permission prompt keys:
+        // y = yes, n = no, a = always allow, d = don't ask again
+        let answer: string;
+        if (modifier === 'always') {
+          answer = 'a';
+        } else if (modifier === 'never') {
+          answer = 'd';
+        } else {
+          answer = allow ? 'y' : 'n';
+        }
+        this.log(`[Codedeck] Permission response for session ${sessionId}: ${answer}`);
+        const sent = await this.terminal.sendText(answer, sessionId);
+        if (!sent) {
+          this.log(`[Codedeck] WARNING: Failed to deliver permission ${answer} to terminal for ${sessionId}`);
+        }
       },
       onModeChange: (sessionId, mode) => {
         this.log(`[Codedeck] Mode change for session ${sessionId}: ${mode}`);
@@ -138,6 +167,9 @@ export class BridgeCore {
         const sessions = this.sessionProvider.getSessions();
         this.log(`[Codedeck] Re-publishing ${sessions.length} sessions (after rescan)`);
         this.onSessionListChanged(sessions);
+      },
+      onUploadImage: (sessionId, uploadId, filename, mimeType, base64Data, text, chunkIndex, totalChunks) => {
+        this.handleImageChunk(sessionId, uploadId, filename, mimeType, base64Data, text, chunkIndex, totalChunks);
       },
     };
 
@@ -188,5 +220,88 @@ export class BridgeCore {
   /** Disconnect from Nostr relays. */
   disconnect(): void {
     this.relay.disconnect();
+  }
+
+  // --- Image upload chunk assembly ---
+
+  private handleImageChunk(
+    sessionId: string, uploadId: string, filename: string, mimeType: string,
+    base64Data: string, text: string, chunkIndex: number, totalChunks: number,
+  ): void {
+    let tracker = this.imageChunks.get(uploadId);
+
+    if (!tracker) {
+      const timeoutId = setTimeout(() => {
+        const t = this.imageChunks.get(uploadId);
+        this.log(`[Codedeck] Image upload ${uploadId} timed out (received ${t?.received.size ?? 0}/${totalChunks} chunks)`);
+        this.imageChunks.delete(uploadId);
+      }, BridgeCore.IMAGE_ASSEMBLY_TIMEOUT_MS);
+
+      tracker = { sessionId, filename, mimeType, text, totalChunks, received: new Map(), timeoutId };
+      this.imageChunks.set(uploadId, tracker);
+    }
+
+    tracker.received.set(chunkIndex, base64Data);
+    if (chunkIndex === 0 && text) {
+      tracker.text = text;
+    }
+
+    this.log(`[Codedeck] Image chunk ${chunkIndex + 1}/${totalChunks} for upload ${uploadId}`);
+
+    if (tracker.received.size >= totalChunks) {
+      clearTimeout(tracker.timeoutId);
+      this.imageChunks.delete(uploadId);
+      this.assembleAndWriteImage(tracker);
+    }
+  }
+
+  private async assembleAndWriteImage(tracker: ImageUploadTracker): Promise<void> {
+    // Reassemble base64 in chunk order
+    const parts: string[] = [];
+    for (let i = 0; i < tracker.totalChunks; i++) {
+      const chunk = tracker.received.get(i);
+      if (chunk === undefined) {
+        this.log(`[Codedeck] Missing chunk ${i} for image upload — aborting`);
+        return;
+      }
+      parts.push(chunk);
+    }
+    const fullBase64 = parts.join('');
+
+    // Write to .codedeck/uploads/ in workspace
+    const uploadsDir = path.join(this.workspaceCwd || '.', '.codedeck', 'uploads');
+    try {
+      fs.mkdirSync(uploadsDir, { recursive: true });
+    } catch (err) {
+      this.log(`[Codedeck] Failed to create uploads dir: ${err}`);
+      return;
+    }
+
+    const safeName = tracker.filename.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const ext = tracker.mimeType === 'image/png' ? '.png' : '.jpg';
+    const timestamp = Date.now();
+    const hasExt = safeName.toLowerCase().endsWith(ext);
+    const finalName = `${timestamp}-${safeName}${hasExt ? '' : ext}`;
+    const filePath = path.join(uploadsDir, finalName);
+
+    try {
+      const buffer = Buffer.from(fullBase64, 'base64');
+      fs.writeFileSync(filePath, buffer);
+      this.log(`[Codedeck] Image saved: ${filePath} (${buffer.length} bytes)`);
+    } catch (err) {
+      this.log(`[Codedeck] Failed to write image: ${err}`);
+      return;
+    }
+
+    // Send text to Claude Code terminal referencing the file path
+    const userText = tracker.text.trim();
+    const terminalText = userText
+      ? `${userText}\n\n[Attached image: ${filePath} — use the Read tool to view it]`
+      : `Please examine this image: ${filePath}`;
+
+    const sent = await this.terminal.sendText(terminalText, tracker.sessionId);
+    if (!sent) {
+      this.terminal.notifyNoTerminal();
+    }
   }
 }
