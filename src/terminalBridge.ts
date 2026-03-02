@@ -169,7 +169,7 @@ export class TerminalRegistry implements vscode.Disposable {
       const known = this.sessionTerminals.get(sessionId);
       if (known && known.exitStatus === undefined) {
         console.log(`[Codedeck] sendText delivered to terminal for session ${sessionId}: ${text.slice(0, 50)}...`);
-        known.sendText(text);
+        await this.submitToTerminal(known, text);
         return true;
       }
       if (known) {
@@ -193,9 +193,12 @@ export class TerminalRegistry implements vscode.Disposable {
    * Spawn a new Claude Code terminal with a specific session ID.
    *
    * Creates a terminal with the user's default shell (bash/zsh), then
-   * executes `claude --session-id <uuid> --ide` inside it. This ensures
-   * proper TTY line discipline so that sendText() input is submitted
-   * correctly (the shell translates \n → \r for the child process).
+   * executes `claude --session-id <uuid> --ide` inside it.
+   *
+   * Note: Claude Code's Ink TUI uses raw mode, so user input must go through
+   * submitToTerminal() (Escape+Enter workaround), not plain sendText().
+   * The initial `claude` command itself is fine via sendText/executeCommand
+   * because it runs in the shell before Ink takes over.
    *
    * The terminal ↔ sessionId mapping is set deterministically at creation time.
    */
@@ -255,6 +258,42 @@ export class TerminalRegistry implements vscode.Disposable {
     this.launchDisposables.set(terminal, disposables);
   }
 
+  /**
+   * Submit text to a Claude Code terminal's Ink TUI.
+   *
+   * Claude Code uses Ink (React for CLIs) which puts the terminal in raw mode.
+   * Ink's ink-text-input treats programmatic \n / \r as newline characters,
+   * NOT as submit actions. Additionally, autocomplete intercepts Enter.
+   *
+   * Workaround (proven by tmux multi-agent systems):
+   *   1. Type text (no newline)
+   *   2. Wait 300ms for autocomplete to engage
+   *   3. Send Escape to dismiss autocomplete
+   *   4. Wait 100ms
+   *   5. Send Enter to submit
+   *
+   * All steps use terminal.sendText() which targets a specific terminal
+   * instance, avoiding the active-terminal routing problem of sendSequence.
+   *
+   * See: https://github.com/anthropics/claude-code/issues/15553
+   */
+  private async submitToTerminal(terminal: vscode.Terminal, text: string): Promise<void> {
+    // Type the text without submitting
+    terminal.sendText(text, false);
+
+    // Wait for autocomplete to engage
+    await new Promise(r => setTimeout(r, 300));
+
+    // Escape to dismiss autocomplete
+    terminal.sendText('\x1b', false);
+
+    // Small delay before Enter
+    await new Promise(r => setTimeout(r, 100));
+
+    // Enter to submit
+    terminal.sendText('\r', false);
+  }
+
   /** Clean up shell integration listeners for a terminal. */
   private cleanupLaunchDisposables(terminal: vscode.Terminal): void {
     const pending = this.launchDisposables.get(terminal);
@@ -266,8 +305,9 @@ export class TerminalRegistry implements vscode.Disposable {
 
   /**
    * Flush queued inputs for a session once its terminal mapping is established.
+   * Sends each input sequentially since submitToTerminal uses timed delays.
    */
-  private flushPendingInputs(sessionId: string, terminal: vscode.Terminal): void {
+  private async flushPendingInputs(sessionId: string, terminal: vscode.Terminal): Promise<void> {
     const now = Date.now();
     const toSend: PendingInput[] = [];
     const remaining: PendingInput[] = [];
@@ -288,7 +328,7 @@ export class TerminalRegistry implements vscode.Disposable {
 
     for (const { text } of toSend) {
       console.log(`[Codedeck] Flushing pending input to session ${sessionId}: ${text.slice(0, 50)}...`);
-      terminal.sendText(text);
+      await this.submitToTerminal(terminal, text);
     }
   }
 
