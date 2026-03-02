@@ -210,6 +210,13 @@ function formatToolInput(toolName: string, input: Record<string, unknown>): stri
   }
 }
 
+/** Extract UUID v4 sessionId from a filename like `26c0ab90-…-.jsonl`. */
+function extractUuidFromFilename(filePath: string): string | null {
+  const basename = path.basename(filePath, '.jsonl');
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  return UUID_RE.test(basename) ? basename : null;
+}
+
 /**
  * Extract session metadata from the first few lines of a JSONL file.
  * Returns the session slug, cwd, and sessionId.
@@ -218,10 +225,15 @@ function formatToolInput(toolName: string, input: Record<string, unknown>): stri
  * only contain `sessionId` (e.g. from `queue-operation` entries that lack
  * `cwd`). This breaks the deadlock where a new session file exists but
  * Claude Code hasn't written a user/assistant line yet.
+ *
+ * When `filePath` is provided and content has no sessionId at all (e.g. only
+ * `file-history-snapshot` lines), falls back to extracting the UUID from
+ * the filename.
  */
 export function extractSessionMeta(
   lines: string[],
   fallbackCwd?: string,
+  filePath?: string,
 ): { sessionId: string; slug: string; cwd: string } | null {
   let foundSessionId: string | null = null;
   let foundSlug: string | null = null;
@@ -254,6 +266,15 @@ export function extractSessionMeta(
       slug: foundSlug || foundSessionId.slice(0, 8),
       cwd: fallbackCwd,
     };
+  }
+
+  // Last resort: extract sessionId from UUID filename when content has no
+  // sessionId at all (e.g. new sessions with only file-history-snapshot lines)
+  if (!foundSessionId && filePath && fallbackCwd) {
+    const filenameId = extractUuidFromFilename(filePath);
+    if (filenameId) {
+      return { sessionId: filenameId, slug: filenameId.slice(0, 8), cwd: fallbackCwd };
+    }
   }
   return null;
 }

@@ -159,6 +159,10 @@ export class BridgeCore {
 
     const check = () => {
       attempts++;
+      // Periodically rescan disk in case FileSystemWatcher is slow
+      if (attempts % 3 === 0) {
+        this.sessionProvider?.rescanSessions?.();
+      }
       const sessions = this.sessionProvider?.getSessions() ?? [];
       this.log(`[Codedeck] waitForNewSession: attempt ${attempts}/${MAX_ATTEMPTS}, found ${sessions.length} sessions`);
       const newSession = sessions.find(s => !beforeIds.has(s.id));

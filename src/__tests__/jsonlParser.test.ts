@@ -337,6 +337,71 @@ describe('extractSessionMeta', () => {
       cwd: '/real/path',
     });
   });
+
+  it('extracts sessionId from UUID filename when content has no sessionId', () => {
+    const lines = [
+      '{"type":"file-history-snapshot","messageId":"abc123","snapshot":{}}',
+    ];
+    const meta = extractSessionMeta(
+      lines,
+      '/fallback/workspace',
+      '/home/user/.claude/projects/foo/26c0ab90-a659-4ba9-8468-c360aec1c9e5.jsonl',
+    );
+    expect(meta).toEqual({
+      sessionId: '26c0ab90-a659-4ba9-8468-c360aec1c9e5',
+      slug: '26c0ab90',
+      cwd: '/fallback/workspace',
+    });
+  });
+
+  it('extracts sessionId from UUID filename with empty lines', () => {
+    const meta = extractSessionMeta(
+      [],
+      '/fallback/workspace',
+      '/home/user/.claude/projects/foo/26c0ab90-a659-4ba9-8468-c360aec1c9e5.jsonl',
+    );
+    expect(meta).toEqual({
+      sessionId: '26c0ab90-a659-4ba9-8468-c360aec1c9e5',
+      slug: '26c0ab90',
+      cwd: '/fallback/workspace',
+    });
+  });
+
+  it('returns null for non-UUID filenames even with fallbackCwd', () => {
+    const lines = [
+      '{"type":"file-history-snapshot","messageId":"abc123","snapshot":{}}',
+    ];
+    const meta = extractSessionMeta(
+      lines,
+      '/fallback/workspace',
+      '/home/user/.claude/projects/foo/agent-a74d4fa.jsonl',
+    );
+    expect(meta).toBeNull();
+  });
+
+  it('returns null for UUID filename without fallbackCwd', () => {
+    const lines = [
+      '{"type":"file-history-snapshot","messageId":"abc123","snapshot":{}}',
+    ];
+    const meta = extractSessionMeta(
+      lines,
+      undefined,
+      '/home/user/.claude/projects/foo/26c0ab90-a659-4ba9-8468-c360aec1c9e5.jsonl',
+    );
+    expect(meta).toBeNull();
+  });
+
+  it('prefers content sessionId over filename-derived sessionId', () => {
+    const lines = [
+      '{"type":"queue-operation","operation":"dequeue","sessionId":"from-content"}',
+    ];
+    const meta = extractSessionMeta(
+      lines,
+      '/fallback',
+      '/home/user/.claude/projects/foo/26c0ab90-a659-4ba9-8468-c360aec1c9e5.jsonl',
+    );
+    expect(meta?.sessionId).toBe('from-content');
+  });
 });
 
 describe('resolveProjectFromCwd', () => {

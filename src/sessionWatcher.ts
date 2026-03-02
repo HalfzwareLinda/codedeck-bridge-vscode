@@ -234,7 +234,7 @@ export class SessionWatcher implements vscode.Disposable {
 
     try {
       const lines = this.readFirstLines(filePath, 20);
-      const meta = extractSessionMeta(lines, this.workspaceCwd);
+      const meta = extractSessionMeta(lines, this.workspaceCwd, filePath);
 
       if (meta) {
         const title = extractFirstUserMessage(lines);
@@ -310,7 +310,7 @@ export class SessionWatcher implements vscode.Disposable {
 
       // If we don't have meta for this file yet, try to extract it
       if (!this.sessionMeta.has(filePath)) {
-        const meta = extractSessionMeta(lines, this.workspaceCwd);
+        const meta = extractSessionMeta(lines, this.workspaceCwd, filePath);
         if (meta) {
           const title = extractFirstUserMessage(lines) ?? extractFirstUserMessage(this.readFirstLines(filePath, 20));
           this.sessionMeta.set(filePath, { ...meta, title });
