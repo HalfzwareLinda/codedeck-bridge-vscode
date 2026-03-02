@@ -28,11 +28,11 @@ export function findClaudeTerminals(): vscode.Terminal[] {
 }
 
 /**
- * Show a notification when auto-open fails (e.g., Claude Code extension not installed).
+ * Show a notification when no terminal is found for a session.
  */
 export function notifyNoTerminal(): void {
   vscode.window.showWarningMessage(
-    'Codedeck: Could not open a Claude Code terminal. Is the Claude Code extension installed?',
+    'Codedeck: No active terminal found for this session. The Claude Code terminal may need to be opened in VSCode.',
   );
 }
 
@@ -52,10 +52,11 @@ export class TerminalRegistry implements vscode.Disposable {
   private sessionTerminals: Map<string, vscode.Terminal> = new Map();
   private recentTerminals: Array<{ terminal: vscode.Terminal; openedAt: number }> = [];
   private disposables: vscode.Disposable[] = [];
-  private autoOpenInProgress = false;
   /** Input queued while waiting for a session-to-terminal mapping. */
   private pendingInputs: PendingInput[] = [];
   private static readonly PENDING_INPUT_TIMEOUT_MS = 30_000;
+  /** Shell integration listeners pending for terminals that haven't launched claude yet. */
+  private launchDisposables: Map<vscode.Terminal, vscode.Disposable[]> = new Map();
 
   constructor() {
     this.disposables.push(
@@ -77,6 +78,12 @@ export class TerminalRegistry implements vscode.Disposable {
         }
         // Remove from recent
         this.recentTerminals = this.recentTerminals.filter(r => r.terminal !== terminal);
+        // Clean up any pending shell integration listeners
+        const pending = this.launchDisposables.get(terminal);
+        if (pending) {
+          for (const d of pending) { d.dispose(); }
+          this.launchDisposables.delete(terminal);
+        }
       }),
     );
   }
@@ -152,15 +159,16 @@ export class TerminalRegistry implements vscode.Disposable {
    * Send text input to a Claude Code terminal.
    *
    * Only sends to a terminal with a confirmed sessionId mapping.
-   * If no mapping exists, opens a new Claude Code terminal and queues
-   * the text until SessionWatcher correlates the session.
+   * If no mapping exists, queues the text for potential future matching
+   * (via onNewSession temporal proximity) and returns false so the caller
+   * can notify the user.
    */
   async sendText(text: string, sessionId?: string): Promise<boolean> {
     // 1. Try the known terminal for this session
     if (sessionId) {
       const known = this.sessionTerminals.get(sessionId);
       if (known && known.exitStatus === undefined) {
-        known.sendText(text);
+        known.sendText(text + '\r', false);
         return true;
       }
       if (known) {
@@ -168,12 +176,11 @@ export class TerminalRegistry implements vscode.Disposable {
       }
     }
 
-    // 2. No mapped terminal — open a new one and queue the text
+    // 2. No mapped terminal — queue for potential future match, inform caller
     if (sessionId) {
       this.pendingInputs.push({ text, sessionId, timestamp: Date.now() });
       this.prunePendingInputs();
-      await this.ensureClaudeTerminal();
-      return true;
+      return false;
     }
 
     // 3. No sessionId at all — can't safely route
@@ -182,44 +189,76 @@ export class TerminalRegistry implements vscode.Disposable {
 
   /**
    * Spawn a new Claude Code terminal with a specific session ID.
-   * Uses direct `claude --session-id <uuid>` spawning so the sessionId
-   * is known immediately — no detection chain needed.
+   *
+   * Creates a terminal with the user's default shell (bash/zsh), then
+   * executes `claude --session-id <uuid> --ide` inside it. This ensures
+   * proper TTY line discipline so that sendText() input is submitted
+   * correctly (the shell translates \n → \r for the child process).
    *
    * The terminal ↔ sessionId mapping is set deterministically at creation time.
    */
   createSession(sessionId: string, cwd?: string): vscode.Terminal {
-    const args = ['--session-id', sessionId, '--ide'];
+    const command = `claude --session-id ${sessionId} --ide`;
 
     const terminal = vscode.window.createTerminal({
       name: `Claude Code (${sessionId.slice(0, 8)})`,
-      shellPath: 'claude',
-      shellArgs: args,
+      // No shellPath — use user's default shell (bash/zsh).
+      // Claude runs inside the shell, getting proper TTY line discipline.
       cwd: cwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+      isTransient: true,
     });
 
     // Deterministic mapping — no heuristics needed
     this.sessionTerminals.set(sessionId, terminal);
     terminal.show();
 
+    // Execute claude inside the shell
+    this.launchClaudeInShell(terminal, command);
+
     return terminal;
   }
 
   /**
-   * Open a Claude Code terminal if one isn't already being opened.
-   * Guards against concurrent opens from rapid messages.
+   * Execute a command inside a terminal's shell.
+   * Uses shell integration (executeCommand) when available for reliability,
+   * with a 3-second timeout fallback to sendText().
    */
-  private async ensureClaudeTerminal(): Promise<void> {
-    if (this.autoOpenInProgress) { return; }
+  private launchClaudeInShell(terminal: vscode.Terminal, command: string): void {
+    let resolved = false;
+    const disposables: vscode.Disposable[] = [];
 
-    this.autoOpenInProgress = true;
-    try {
-      await vscode.commands.executeCommand('claude-vscode.terminal.open');
-      // Don't send text here — wait for SessionWatcher to detect the new
-      // JSONL session and call onNewSession(), which flushes pending inputs.
-    } catch (err) {
-      console.error('[Codedeck] Failed to open Claude Code terminal:', err);
-    } finally {
-      this.autoOpenInProgress = false;
+    // Path 1: Shell integration available — use executeCommand
+    disposables.push(
+      vscode.window.onDidChangeTerminalShellIntegration((e) => {
+        if (e.terminal === terminal && !resolved) {
+          resolved = true;
+          console.log(`[Codedeck] Shell integration available, executing: ${command}`);
+          e.shellIntegration.executeCommand(command);
+          this.cleanupLaunchDisposables(terminal);
+        }
+      }),
+    );
+
+    // Path 2: Fallback after 3s — shell integration not available
+    const timer = setTimeout(() => {
+      if (!terminal.shellIntegration && !resolved) {
+        resolved = true;
+        console.log(`[Codedeck] Shell integration timeout, sendText fallback: ${command}`);
+        terminal.sendText(command);
+        this.cleanupLaunchDisposables(terminal);
+      }
+    }, 3000);
+    disposables.push({ dispose: () => clearTimeout(timer) });
+
+    this.launchDisposables.set(terminal, disposables);
+  }
+
+  /** Clean up shell integration listeners for a terminal. */
+  private cleanupLaunchDisposables(terminal: vscode.Terminal): void {
+    const pending = this.launchDisposables.get(terminal);
+    if (pending) {
+      for (const d of pending) { d.dispose(); }
+      this.launchDisposables.delete(terminal);
     }
   }
 
@@ -244,7 +283,7 @@ export class TerminalRegistry implements vscode.Disposable {
 
     for (const { text } of toSend) {
       console.log(`[Codedeck] Flushing pending input to session ${sessionId}: ${text.slice(0, 50)}...`);
-      terminal.sendText(text);
+      terminal.sendText(text + '\r', false);
     }
   }
 
@@ -263,5 +302,9 @@ export class TerminalRegistry implements vscode.Disposable {
 
   dispose(): void {
     for (const d of this.disposables) { d.dispose(); }
+    for (const disposables of this.launchDisposables.values()) {
+      for (const d of disposables) { d.dispose(); }
+    }
+    this.launchDisposables.clear();
   }
 }
