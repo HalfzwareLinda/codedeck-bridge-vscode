@@ -515,6 +515,15 @@ export class SessionWatcher implements vscode.Disposable {
     return path.basename(meta.cwd) || meta.cwd;
   }
 
+  /**
+   * Force a full re-scan of session files from disk.
+   * Called on refresh-sessions requests to pick up changes that
+   * the FileSystemWatcher or poll loop may have missed.
+   */
+  rescanSessions(): void {
+    this.scanAllSessions();
+  }
+
   getSessions(): RemoteSessionInfo[] {
     const sessions: RemoteSessionInfo[] = [];
     const now = Date.now();

@@ -32,6 +32,7 @@ export interface SessionProvider {
   getHistory: (sessionId: string, afterSeq?: number) => Array<{ seq: number; entry: OutputEntry }>;
   loadFullHistory: (sessionId: string) => Array<{ seq: number; entry: OutputEntry }>;
   getHistoryCount: (sessionId: string) => number;
+  rescanSessions?: () => void;
 }
 
 /**
@@ -55,14 +56,18 @@ export class BridgeCore {
         }
       },
       onCreateSession: async () => {
-        this.log('[Codedeck] Create session request received');
-        const beforeIds = new Set(
-          this.sessionProvider?.getSessions().map(s => s.id) ?? []
-        );
-        await this.terminal.createSession();
-        // Don't publish here — the JSONL file doesn't exist yet.
-        // Instead, poll until the new session appears and force-publish.
-        this.waitForNewSession(beforeIds);
+        try {
+          this.log('[Codedeck] Create session request received');
+          const beforeIds = new Set(
+            this.sessionProvider?.getSessions().map(s => s.id) ?? []
+          );
+          this.log(`[Codedeck] beforeIds: ${beforeIds.size} sessions`);
+          await this.terminal.createSession();
+          this.log('[Codedeck] createSession resolved, starting poll...');
+          this.waitForNewSession(beforeIds);
+        } catch (err) {
+          this.log(`[Codedeck] onCreateSession failed: ${err}`);
+        }
       },
       onPermissionResponse: (_sessionId, _requestId, _allow) => {
         console.log(`[Codedeck] Permission response received (not yet implemented)`);
@@ -95,6 +100,15 @@ export class BridgeCore {
           console.error('[Codedeck] Failed to publish history:', err);
         });
       },
+      onRefreshSessions: () => {
+        this.log('[Codedeck] Refresh sessions request received');
+        if (!this.sessionProvider) { return; }
+        // Re-scan files from disk first — picks up changes the watcher missed
+        this.sessionProvider.rescanSessions?.();
+        const sessions = this.sessionProvider.getSessions();
+        this.log(`[Codedeck] Re-publishing ${sessions.length} sessions (after rescan)`);
+        this.onSessionListChanged(sessions);
+      },
     };
 
     this.relay = new NostrRelay(
@@ -103,6 +117,7 @@ export class BridgeCore {
       config.pairedPhones,
       config.machineName,
       relayEvents,
+      log,
     );
   }
 
@@ -131,13 +146,21 @@ export class BridgeCore {
    * phone sees it without waiting for SessionWatcher's debounce/poll.
    */
   private waitForNewSession(beforeIds: Set<string>): void {
+    if (!this.sessionProvider) {
+      this.log('[Codedeck] waitForNewSession: no sessionProvider — skipping poll');
+      return;
+    }
+
     const MAX_ATTEMPTS = 15;
     const INTERVAL_MS = 1_000;
     let attempts = 0;
 
+    this.log(`[Codedeck] waitForNewSession: starting poll (beforeIds: ${[...beforeIds].join(', ') || 'none'})`);
+
     const check = () => {
       attempts++;
       const sessions = this.sessionProvider?.getSessions() ?? [];
+      this.log(`[Codedeck] waitForNewSession: attempt ${attempts}/${MAX_ATTEMPTS}, found ${sessions.length} sessions`);
       const newSession = sessions.find(s => !beforeIds.has(s.id));
 
       if (newSession) {
@@ -147,7 +170,7 @@ export class BridgeCore {
       }
 
       if (attempts >= MAX_ATTEMPTS) {
-        this.log(`[Codedeck] Timed out waiting for new session after ${MAX_ATTEMPTS}s`);
+        this.log(`[Codedeck] Timed out waiting for new session after ${MAX_ATTEMPTS}s — publishing ${sessions.length} existing sessions`);
         this.onSessionListChanged(sessions);
         return;
       }

@@ -31,6 +31,7 @@ export interface NostrRelayEvents {
   onModeChange: (sessionId: string, mode: 'plan' | 'auto') => void;
   onHistoryRequest: (sessionId: string, afterSeq: number | undefined, phonePubkey: string) => void;
   onCreateSession: () => void;
+  onRefreshSessions: () => void;
 }
 
 export class NostrRelay {
@@ -44,6 +45,7 @@ export class NostrRelay {
   private machineName: string;
   private onConnectionChange?: (status: 'connected' | 'disconnected' | 'error', message?: string) => void;
   private reconnecting = false;
+  private log: (msg: string) => void;
 
   // --- Output throttling ---
   // Queue output entries and flush at most once per interval to avoid relay rate-limits.
@@ -61,6 +63,7 @@ export class NostrRelay {
     pairedPhones: PairedPhone[],
     machineName: string,
     events: NostrRelayEvents,
+    log?: (msg: string) => void,
   ) {
     this.secretKey = secretKey;
     this.pubkeyHex = getPublicKey(secretKey);
@@ -68,6 +71,7 @@ export class NostrRelay {
     this.pairedPhones = pairedPhones;
     this.events = events;
     this.machineName = machineName;
+    this.log = log ?? console.log;
   }
 
   get npub(): string {
@@ -92,7 +96,7 @@ export class NostrRelay {
     // Subscribe to events tagged to our pubkey from paired phones
     const phonePubkeys = this.pairedPhones.map(p => p.pubkeyHex);
     if (phonePubkeys.length === 0) {
-      console.log('[Codedeck] No paired phones, skipping subscription');
+      this.log('[Codedeck] No paired phones, skipping subscription');
       this.onConnectionChange?.('disconnected', 'No paired phones');
       return;
     }
@@ -114,7 +118,7 @@ export class NostrRelay {
             this.handleIncomingEvent(event);
           },
           oneose: () => {
-            console.log('[Codedeck] Connected to relays, subscription active');
+            this.log('[Codedeck] Connected to relays, subscription active');
             this.onConnectionChange?.('connected');
           },
         },
@@ -172,7 +176,7 @@ export class NostrRelay {
    */
   async publishSessionList(sessions: RemoteSessionInfo[]): Promise<void> {
     if (!this.pool || this.pairedPhones.length === 0) {
-      console.log(`[Codedeck] publishSessionList skipped: pool=${!!this.pool}, phones=${this.pairedPhones.length}`);
+      this.log(`[Codedeck] publishSessionList skipped: pool=${!!this.pool}, phones=${this.pairedPhones.length}`);
       return;
     }
 
@@ -184,7 +188,7 @@ export class NostrRelay {
 
       // Retry once after delay if every relay rejected the publish
       if (allFailed && this.pool) {
-        console.log('[Codedeck] Session list publish failed on all relays — retrying in 3s');
+        this.log('[Codedeck] Session list publish failed on all relays — retrying in 3s');
         await new Promise(resolve => setTimeout(resolve, 3_000));
         if (this.pool) {
           await this.doPublishSessionList(sessions);
@@ -197,7 +201,7 @@ export class NostrRelay {
 
   /** Internal: publish session list to all phones. Returns true if ALL relays failed. */
   private async doPublishSessionList(sessions: RemoteSessionInfo[]): Promise<boolean> {
-    console.log(`[Codedeck] publishSessionList: ${sessions.length} sessions to ${this.pairedPhones.length} phones via ${this.relays.join(', ')}`);
+    this.log(`[Codedeck] publishSessionList: ${sessions.length} sessions to ${this.pairedPhones.length} phones via ${this.relays.join(', ')}`);
 
     const msg: BridgeOutbound = {
       type: 'sessions',
@@ -224,12 +228,12 @@ export class NostrRelay {
           content: ciphertext,
         }, this.secretKey);
 
-        console.log(`[Codedeck] Publishing session list event: kind=${event.kind}, content=${ciphertext.length} chars, to ${phone.label} (${phone.pubkeyHex.slice(0, 8)}...)`);
+        this.log(`[Codedeck] Publishing session list event: kind=${event.kind}, content=${ciphertext.length} chars, to ${phone.label} (${phone.pubkeyHex.slice(0, 8)}...)`);
         const results = this.pool.publish(this.relays, event);
         const outcomes = await Promise.allSettled(results);
         for (let i = 0; i < outcomes.length; i++) {
           if (outcomes[i].status === 'fulfilled') {
-            console.log(`[Codedeck] Relay ${this.relays[i]}: publish OK`);
+            this.log(`[Codedeck] Relay ${this.relays[i]}: publish OK`);
             anySuccess = true;
           } else {
             console.error(`[Codedeck] Relay ${this.relays[i]}: publish FAILED`, (outcomes[i] as PromiseRejectedResult).reason);
@@ -269,6 +273,7 @@ export class NostrRelay {
   private flushOutputQueue(): void {
     // Defer if a session list publish is in progress (give it relay bandwidth)
     if (this.sessionListPublishing) {
+      this.log(`[Codedeck] flushOutputQueue: deferred (session list publishing), ${this.outputQueue.length} entries queued`);
       if (this.outputQueue.length > 0 && !this.outputFlushTimer) {
         this.outputFlushTimer = setTimeout(() => {
           this.outputFlushTimer = null;
@@ -281,6 +286,7 @@ export class NostrRelay {
     if (!this.pool || this.pairedPhones.length === 0 || this.outputQueue.length === 0) { return; }
 
     const batch = this.outputQueue.splice(0);
+    this.log(`[Codedeck] flushOutputQueue: sending ${batch.length} entries to ${this.pairedPhones.length} phones`);
 
     for (const { sessionId, seq, entry } of batch) {
       const msg: BridgeOutbound = {
@@ -343,7 +349,7 @@ export class NostrRelay {
     const chunks = this.splitIntoChunks(entries);
     const totalChunks = chunks.length;
 
-    console.log(`[Codedeck] publishHistory: ${entries.length} entries in ${totalChunks} chunks for session ${sessionId}`);
+    this.log(`[Codedeck] publishHistory: ${entries.length} entries in ${totalChunks} chunks for session ${sessionId}`);
 
     for (let i = 0; i < chunks.length; i++) {
       if (!this.pool) { return; }
@@ -443,14 +449,14 @@ export class NostrRelay {
     // Safety net: ignore events older than 60s (in case relays don't enforce `since`)
     const now = Math.floor(Date.now() / 1000);
     if (event.created_at < now - 60) {
-      console.log(`[Codedeck] Ignoring stale event (${now - event.created_at}s old)`);
+      this.log(`[Codedeck] Ignoring stale event (${now - event.created_at}s old)`);
       return;
     }
 
     // Verify it's from a paired phone
     const phone = this.pairedPhones.find(p => p.pubkeyHex === event.pubkey);
     if (!phone) {
-      console.log(`[Codedeck] Ignoring event from unknown pubkey: ${event.pubkey.slice(0, 8)}...`);
+      this.log(`[Codedeck] Ignoring event from unknown pubkey: ${event.pubkey.slice(0, 8)}...`);
       return;
     }
 
@@ -460,7 +466,7 @@ export class NostrRelay {
       const plaintext = decrypt(event.content, conversationKey);
       const msg: BridgeInbound = JSON.parse(plaintext);
 
-      console.log(`[Codedeck] Received ${msg.type} from ${phone.label} for session ${'sessionId' in msg ? msg.sessionId : 'N/A'}`);
+      this.log(`[Codedeck] Received ${msg.type} from ${phone.label} for session ${'sessionId' in msg ? msg.sessionId : 'N/A'}`);
 
       switch (msg.type) {
         case 'input':
@@ -478,7 +484,11 @@ export class NostrRelay {
           break;
         case 'create-session':
           Promise.resolve(this.events.onCreateSession())
-            .catch(err => console.error('[Codedeck] onCreateSession handler error:', err));
+            .catch(err => this.log(`[Codedeck] onCreateSession handler error: ${err}`));
+          break;
+        case 'refresh-sessions':
+          Promise.resolve(this.events.onRefreshSessions())
+            .catch(err => this.log(`[Codedeck] onRefreshSessions handler error: ${err}`));
           break;
       }
     } catch (err) {

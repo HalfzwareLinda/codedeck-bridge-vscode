@@ -88,10 +88,16 @@ export interface CreateSessionMessage {
   type: 'create-session';
 }
 
+// --- Refresh sessions (phone → bridge) ---
+
+export interface RefreshSessionsMessage {
+  type: 'refresh-sessions';
+}
+
 // --- Union ---
 
 export type BridgeOutbound = SessionListMessage | OutputMessage | HistoryResponseMessage;
-export type BridgeInbound = InputMessage | PermissionResponseMessage | ModeChangeMessage | HistoryRequestMessage | CreateSessionMessage;
+export type BridgeInbound = InputMessage | PermissionResponseMessage | ModeChangeMessage | HistoryRequestMessage | CreateSessionMessage | RefreshSessionsMessage;
 export type BridgeMessage = BridgeOutbound | BridgeInbound;
 
 // --- Nostr event kinds ---
