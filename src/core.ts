@@ -65,7 +65,7 @@ export class BridgeCore {
 
         try {
           // Direct spawn: deterministic sessionId, immediate terminal mapping
-          this.terminal.createSession(sessionId);
+          this.terminal.createSession(sessionId, this.workspaceCwd || undefined);
 
           // Publish session-pending so the phone creates a placeholder
           // (phone expects pending → ready sequence for its UI)

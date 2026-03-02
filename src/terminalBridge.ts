@@ -160,7 +160,7 @@ export class TerminalRegistry implements vscode.Disposable {
     if (sessionId) {
       const known = this.sessionTerminals.get(sessionId);
       if (known && known.exitStatus === undefined) {
-        known.sendText(text + '\r', false);
+        known.sendText(text);
         return true;
       }
       if (known) {
@@ -244,7 +244,7 @@ export class TerminalRegistry implements vscode.Disposable {
 
     for (const { text } of toSend) {
       console.log(`[Codedeck] Flushing pending input to session ${sessionId}: ${text.slice(0, 50)}...`);
-      terminal.sendText(text + '\r', false);
+      terminal.sendText(text);
     }
   }
 
