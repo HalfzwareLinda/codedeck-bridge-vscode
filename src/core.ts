@@ -23,8 +23,10 @@ export interface BridgeCoreConfig {
 
 export interface TerminalSender {
   sendText: (text: string, sessionId?: string, addNewline?: boolean) => Promise<boolean>;
-  createSession: () => Promise<void>;
+  createSession: (pendingId?: string) => Promise<void>;
   notifyNoTerminal: () => void;
+  getPendingId?: (sessionId: string) => string | undefined;
+  clearPendingId?: (pendingId: string) => void;
 }
 
 export interface SessionProvider {
@@ -34,7 +36,8 @@ export interface SessionProvider {
   getHistoryCount: (sessionId: string) => number;
   rescanSessions?: () => void;
   getAllSessionIds?: () => string[];
-  findNewSessionNotIn?: (excludeIds: Set<string>) => RemoteSessionInfo | null;
+  /** Lightweight scan for new session files not yet indexed. */
+  scanForNewFiles?: () => void;
 }
 
 /**
@@ -45,6 +48,10 @@ export class BridgeCore {
   public readonly relay: NostrRelay;
   private terminal: TerminalSender;
   private sessionProvider: SessionProvider | null = null;
+
+  /** Non-blocking pending session tracking: pendingId → timeout handle. */
+  private pendingSessions: Map<string, { pendingId: string; timeoutHandle: ReturnType<typeof setTimeout> }> = new Map();
+  private static readonly PENDING_SESSION_TIMEOUT_MS = 30_000;
 
   constructor(config: BridgeCoreConfig, terminal: TerminalSender, private log: (msg: string) => void = console.log) {
     this.terminal = terminal;
@@ -58,19 +65,34 @@ export class BridgeCore {
         }
       },
       onCreateSession: async () => {
+        const pendingId = crypto.randomUUID();
+        this.log(`[Codedeck] Create session request received, pendingId=${pendingId}`);
+
         try {
-          this.log('[Codedeck] Create session request received');
-          // Snapshot ALL session IDs (not just top 15 from getSessions)
-          const allIds = this.sessionProvider?.getAllSessionIds?.();
-          const beforeIds = allIds
-            ? new Set(allIds)
-            : new Set(this.sessionProvider?.getSessions().map(s => s.id) ?? []);
-          this.log(`[Codedeck] beforeIds: ${beforeIds.size} sessions`);
-          await this.terminal.createSession();
-          this.log('[Codedeck] createSession resolved, starting poll...');
-          this.waitForNewSession(beforeIds);
+          // Await the terminal open (~200ms) — confirms the command succeeded
+          await this.terminal.createSession(pendingId);
+          this.log(`[Codedeck] Terminal opened for ${pendingId}, publishing session-pending`);
+
+          // Publish session-pending (sub-second, terminal confirmed open)
+          await this.relay.publishSessionPending(pendingId);
+
+          // Start 30s timeout → publish session-failed('timeout')
+          const timeoutHandle = setTimeout(() => {
+            this.log(`[Codedeck] Pending session ${pendingId} timed out after ${BridgeCore.PENDING_SESSION_TIMEOUT_MS / 1000}s`);
+            this.pendingSessions.delete(pendingId);
+            this.terminal.clearPendingId?.(pendingId);
+            this.relay.publishSessionFailed(pendingId, 'timeout').catch(err => {
+              this.log(`[Codedeck] Failed to publish session-failed: ${err}`);
+            });
+          }, BridgeCore.PENDING_SESSION_TIMEOUT_MS);
+
+          this.pendingSessions.set(pendingId, { pendingId, timeoutHandle });
+
+          // Return immediately — no blocking await
         } catch (err) {
-          this.log(`[Codedeck] onCreateSession failed: ${err}`);
+          this.log(`[Codedeck] Terminal open failed for ${pendingId}: ${err}`);
+          // Publish session-failed immediately
+          await this.relay.publishSessionFailed(pendingId, 'terminal-failed');
         }
       },
       onPermissionResponse: (_sessionId, _requestId, _allow) => {
@@ -145,64 +167,38 @@ export class BridgeCore {
   }
 
   /**
-   * Poll for a new session to appear after a create-session request.
-   * When found, immediately publish the updated session list so the
-   * phone sees it without waiting for SessionWatcher's debounce/poll.
+   * Called by extension.ts when SessionWatcher detects a new session file.
+   * If there's a matching pendingId (via terminal identity), publish session-ready
+   * and clear the timeout. Otherwise just publish the session list.
    */
-  private waitForNewSession(beforeIds: Set<string>): void {
-    if (!this.sessionProvider) {
-      this.log('[Codedeck] waitForNewSession: no sessionProvider — skipping poll');
-      return;
+  onNewSession(sessionId: string, cwd: string): void {
+    // Look up pendingId via terminal identity
+    const pendingId = this.terminal.getPendingId?.(sessionId);
+
+    if (pendingId && this.pendingSessions.has(pendingId)) {
+      const pending = this.pendingSessions.get(pendingId)!;
+      clearTimeout(pending.timeoutHandle);
+      this.pendingSessions.delete(pendingId);
+      this.terminal.clearPendingId?.(pendingId);
+
+      // Find the real session info
+      const sessions = this.sessionProvider?.getSessions() ?? [];
+      const session = sessions.find(s => s.id === sessionId);
+
+      if (session) {
+        this.log(`[Codedeck] New session ${sessionId} matched pendingId ${pendingId} — publishing session-ready`);
+        this.relay.publishSessionReady(pendingId, session).catch(err => {
+          this.log(`[Codedeck] Failed to publish session-ready: ${err}`);
+        });
+      }
+
+      // Also publish the updated session list
+      this.onSessionListChanged(sessions);
+    } else {
+      // No pendingId match — user opened terminal manually, just publish session list
+      const sessions = this.sessionProvider?.getSessions() ?? [];
+      this.onSessionListChanged(sessions);
     }
-
-    const MAX_ATTEMPTS = 45;
-    const INTERVAL_MS = 1_000;
-    let attempts = 0;
-
-    this.log(`[Codedeck] waitForNewSession: starting poll (${beforeIds.size} existing sessions, timeout ${MAX_ATTEMPTS}s)`);
-
-    const check = () => {
-      attempts++;
-      // Periodically rescan disk in case FileSystemWatcher is slow
-      if (attempts % 3 === 0) {
-        this.sessionProvider?.rescanSessions?.();
-      }
-
-      // Search ALL indexed sessions (no 15-cap) for one not in beforeIds
-      const found = this.sessionProvider?.findNewSessionNotIn?.(beforeIds) ?? null;
-      if (found) {
-        this.log(`[Codedeck] New session detected: ${found.slug} (${found.id}) after ${attempts}s — force-publishing session list`);
-        const sessions = this.sessionProvider?.getSessions() ?? [];
-        this.onSessionListChanged(sessions);
-        return;
-      }
-
-      // Fallback for providers without findNewSessionNotIn
-      if (!this.sessionProvider?.findNewSessionNotIn) {
-        const sessions = this.sessionProvider?.getSessions() ?? [];
-        const newSession = sessions.find(s => !beforeIds.has(s.id));
-        if (newSession) {
-          this.log(`[Codedeck] New session detected: ${newSession.slug} (${newSession.id}) after ${attempts}s — force-publishing session list`);
-          this.onSessionListChanged(sessions);
-          return;
-        }
-      }
-
-      if (attempts % 5 === 0) {
-        this.log(`[Codedeck] waitForNewSession: attempt ${attempts}/${MAX_ATTEMPTS}, no new session yet`);
-      }
-
-      if (attempts >= MAX_ATTEMPTS) {
-        const sessions = this.sessionProvider?.getSessions() ?? [];
-        this.log(`[Codedeck] Timed out waiting for new session after ${MAX_ATTEMPTS}s — publishing ${sessions.length} existing sessions`);
-        this.onSessionListChanged(sessions);
-        return;
-      }
-
-      setTimeout(check, INTERVAL_MS);
-    };
-
-    setTimeout(check, INTERVAL_MS);
   }
 
   /** Connect to Nostr relays if phones are paired. */
@@ -212,6 +208,11 @@ export class BridgeCore {
 
   /** Disconnect from Nostr relays. */
   disconnect(): void {
+    // Clean up all pending session timeouts
+    for (const [, pending] of this.pendingSessions) {
+      clearTimeout(pending.timeoutHandle);
+    }
+    this.pendingSessions.clear();
     this.relay.disconnect();
   }
 }

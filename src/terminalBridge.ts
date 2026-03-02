@@ -67,6 +67,14 @@ export class TerminalRegistry implements vscode.Disposable {
   private pendingInputs: PendingInput[] = [];
   private static readonly PENDING_INPUT_TIMEOUT_MS = 30_000;
 
+  // --- Two-phase pending session tracking ---
+  /** pendingId to assign to the next Claude terminal that opens. */
+  private nextPendingId: string | null = null;
+  /** Maps pendingId → terminal (for matching JSONL sessions to pending requests). */
+  private pendingTerminals: Map<string, vscode.Terminal> = new Map();
+  /** Expiry timer for nextPendingId — clears stale mapping if onDidOpenTerminal doesn't fire. */
+  private nextPendingExpiry: ReturnType<typeof setTimeout> | null = null;
+
   constructor() {
     this.disposables.push(
       vscode.window.onDidOpenTerminal(terminal => {
@@ -75,6 +83,16 @@ export class TerminalRegistry implements vscode.Disposable {
           // Keep only last 30 seconds of recent terminals
           const cutoff = Date.now() - 30_000;
           this.recentTerminals = this.recentTerminals.filter(r => r.openedAt > cutoff);
+
+          // Consume nextPendingId — only for Claude terminals (v2 guard)
+          if (this.nextPendingId) {
+            this.pendingTerminals.set(this.nextPendingId, terminal);
+            this.nextPendingId = null;
+            if (this.nextPendingExpiry) {
+              clearTimeout(this.nextPendingExpiry);
+              this.nextPendingExpiry = null;
+            }
+          }
         }
       }),
       vscode.window.onDidCloseTerminal(terminal => {
@@ -100,18 +118,31 @@ export class TerminalRegistry implements vscode.Disposable {
   onNewSession(sessionId: string, cwd: string): void {
     if (this.sessionTerminals.has(sessionId)) { return; }
 
+    // 1. Check pendingTerminals first — strongest signal (deterministic match)
+    for (const [pendingId, terminal] of this.pendingTerminals) {
+      // Match by cwd: the terminal's working directory should match the session's cwd
+      // Since VSCode terminals don't reliably expose cwd, we match by cwd basename in terminal name
+      const cwdBasename = cwd.split('/').pop() || '';
+      const nameMatch = cwdBasename && terminal.name.includes(cwdBasename);
+      // If only one pending terminal, it's a high-confidence match regardless of name
+      if (this.pendingTerminals.size === 1 || nameMatch) {
+        this.sessionTerminals.set(sessionId, terminal);
+        this.pendingTerminals.delete(pendingId);
+        this.flushPendingInputs(sessionId, terminal);
+        return;
+      }
+    }
+
+    // 2. Fall back to temporal proximity (existing logic)
     const now = Date.now();
-    // Prune stale entries while we're here
     this.recentTerminals = this.recentTerminals.filter(r => (now - r.openedAt) < 30_000);
     const candidates = this.recentTerminals.filter(r => (now - r.openedAt) < 10_000);
 
     let matched: vscode.Terminal | null = null;
 
     if (candidates.length === 1) {
-      // Only one recent Claude terminal — high confidence match
       matched = candidates[0].terminal;
     } else {
-      // Try matching by cwd basename in terminal name
       const cwdBasename = cwd.split('/').pop() || '';
       if (cwdBasename) {
         for (const c of candidates) {
@@ -192,9 +223,48 @@ export class TerminalRegistry implements vscode.Disposable {
   /**
    * Open a new Claude Code terminal session via the official extension command.
    * Used when the phone requests a new session.
+   *
+   * @param pendingId If provided, the next Claude terminal that opens will be
+   *   mapped to this pendingId in `pendingTerminals`. A 5s expiry timer prevents
+   *   stale mappings if `onDidOpenTerminal` doesn't fire.
    */
-  async createSession(): Promise<void> {
+  async createSession(pendingId?: string): Promise<void> {
+    if (pendingId) {
+      this.nextPendingId = pendingId;
+      // 5s expiry — clear nextPendingId if onDidOpenTerminal hasn't consumed it
+      if (this.nextPendingExpiry) { clearTimeout(this.nextPendingExpiry); }
+      this.nextPendingExpiry = setTimeout(() => {
+        if (this.nextPendingId === pendingId) {
+          this.nextPendingId = null;
+        }
+        this.nextPendingExpiry = null;
+      }, 5_000);
+    }
     await this.ensureClaudeTerminal();
+  }
+
+  /**
+   * Look up the pendingId for a session by matching the terminal's identity.
+   * Called by core.ts when SessionWatcher detects a new JSONL file.
+   */
+  getPendingId(sessionId: string): string | undefined {
+    const terminal = this.sessionTerminals.get(sessionId);
+    if (!terminal) { return undefined; }
+
+    // Search pendingTerminals for the same terminal object
+    for (const [pendingId, pendingTerminal] of this.pendingTerminals) {
+      if (pendingTerminal === terminal) {
+        return pendingId;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Remove a pendingId from the pending tracking (called after session-ready is published).
+   */
+  clearPendingId(pendingId: string): void {
+    this.pendingTerminals.delete(pendingId);
   }
 
   /**

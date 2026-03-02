@@ -72,12 +72,14 @@ export function activate(context: vscode.ExtensionContext): void {
     { secretKey, relays, machineName, pairedPhones },
     {
       sendText: (text, sessionId?) => terminalRegistry.sendText(text, sessionId),
-      createSession: async () => {
-        log('[Codedeck] Opening Claude Code terminal...');
-        await terminalRegistry.createSession();
+      createSession: async (pendingId?) => {
+        log(`[Codedeck] Opening Claude Code terminal...${pendingId ? ` (pendingId=${pendingId})` : ''}`);
+        await terminalRegistry.createSession(pendingId);
         log('[Codedeck] Claude Code terminal opened');
       },
       notifyNoTerminal,
+      getPendingId: (sessionId) => terminalRegistry.getPendingId(sessionId),
+      clearPendingId: (pendingId) => terminalRegistry.clearPendingId(pendingId),
     },
     log,
   );
@@ -119,6 +121,7 @@ export function activate(context: vscode.ExtensionContext): void {
     },
     onNewSession: (sessionId, cwd) => {
       terminalRegistry.onNewSession(sessionId, cwd);
+      bridgeCore?.onNewSession(sessionId, cwd);
     },
     onExistingSession: (sessionId, cwd) => {
       terminalRegistry.mapExistingSession(sessionId, cwd);

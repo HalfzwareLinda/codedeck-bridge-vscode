@@ -94,9 +94,30 @@ export interface RefreshSessionsMessage {
   type: 'refresh-sessions';
 }
 
+// --- Two-phase session creation (bridge → phone) ---
+
+export interface SessionPendingMessage {
+  type: 'session-pending';
+  pendingId: string;    // bridge-generated UUID
+  machine: string;
+  createdAt: string;    // ISO timestamp
+}
+
+export interface SessionReadyMessage {
+  type: 'session-ready';
+  pendingId: string;
+  session: RemoteSessionInfo;
+}
+
+export interface SessionFailedMessage {
+  type: 'session-failed';
+  pendingId: string;
+  reason: string;       // 'timeout' | 'terminal-failed'
+}
+
 // --- Union ---
 
-export type BridgeOutbound = SessionListMessage | OutputMessage | HistoryResponseMessage;
+export type BridgeOutbound = SessionListMessage | OutputMessage | HistoryResponseMessage | SessionPendingMessage | SessionReadyMessage | SessionFailedMessage;
 export type BridgeInbound = InputMessage | PermissionResponseMessage | ModeChangeMessage | HistoryRequestMessage | CreateSessionMessage | RefreshSessionsMessage;
 export type BridgeMessage = BridgeOutbound | BridgeInbound;
 

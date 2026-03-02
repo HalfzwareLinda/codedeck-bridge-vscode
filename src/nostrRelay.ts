@@ -22,6 +22,9 @@ import type {
   PairedPhone,
   OutputEntry,
   RemoteSessionInfo,
+  SessionPendingMessage,
+  SessionReadyMessage,
+  SessionFailedMessage,
 } from './types';
 import { SESSION_LIST_EVENT_KIND, OUTPUT_EVENT_KIND } from './types';
 
@@ -327,6 +330,81 @@ export class NostrRelay {
         }
       }
     }
+  }
+
+  // --- Two-phase session creation ---
+
+  /**
+   * Publish a message to all paired phones using OUTPUT_EVENT_KIND with NIP-40 expiration.
+   * Used for session-pending/ready/failed messages that are short-lived.
+   */
+  private async publishToAllPhones(msg: BridgeOutbound, expirationSecs: number): Promise<void> {
+    if (!this.pool || this.pairedPhones.length === 0) { return; }
+
+    const json = JSON.stringify(msg);
+    const expiration = String(Math.floor(Date.now() / 1000) + expirationSecs);
+
+    for (const phone of this.pairedPhones) {
+      if (!this.pool) { return; }
+      try {
+        const conversationKey = getConversationKey(this.secretKey, phone.pubkeyHex);
+        const ciphertext = encrypt(json, conversationKey);
+
+        const event = finalizeEvent({
+          kind: OUTPUT_EVENT_KIND,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [
+            ['p', phone.pubkeyHex],
+            ['expiration', expiration],
+          ],
+          content: ciphertext,
+        }, this.secretKey);
+
+        const results = this.pool.publish(this.relays, event);
+        for (let i = 0; i < results.length; i++) {
+          results[i].catch((err: unknown) => {
+            const msg2 = err instanceof Error ? err.message : String(err);
+            console.warn(`[Codedeck] Relay ${this.relays[i]}: publish failed: ${msg2}`);
+          });
+        }
+      } catch (err) {
+        console.error(`[Codedeck] Failed to publish to ${phone.label}:`, err);
+      }
+    }
+  }
+
+  /** Publish session-pending acknowledgment (NIP-40: expires in 2 minutes). */
+  async publishSessionPending(pendingId: string): Promise<void> {
+    const msg: SessionPendingMessage = {
+      type: 'session-pending',
+      pendingId,
+      machine: this.machineName,
+      createdAt: new Date().toISOString(),
+    };
+    this.log(`[Codedeck] Publishing session-pending: ${pendingId}`);
+    await this.publishToAllPhones(msg, 120);
+  }
+
+  /** Publish session-ready upgrade with real session info (NIP-40: expires in 1 minute). */
+  async publishSessionReady(pendingId: string, session: RemoteSessionInfo): Promise<void> {
+    const msg: SessionReadyMessage = {
+      type: 'session-ready',
+      pendingId,
+      session,
+    };
+    this.log(`[Codedeck] Publishing session-ready: ${pendingId} → ${session.id}`);
+    await this.publishToAllPhones(msg, 60);
+  }
+
+  /** Publish session-failed with reason (NIP-40: expires in 1 minute). */
+  async publishSessionFailed(pendingId: string, reason: string): Promise<void> {
+    const msg: SessionFailedMessage = {
+      type: 'session-failed',
+      pendingId,
+      reason,
+    };
+    this.log(`[Codedeck] Publishing session-failed: ${pendingId} (${reason})`);
+    await this.publishToAllPhones(msg, 60);
   }
 
   private static readonly HISTORY_CHUNK_SIZE = 20;

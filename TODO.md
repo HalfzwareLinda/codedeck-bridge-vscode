@@ -1,5 +1,9 @@
 # Codedeck Bridge TODO
 
+## Backlog — Architecture
+
+- [x] **Event-driven new session detection** — Replaced the polling loop in `core.ts:waitForNewSession()` with `awaitNewSession()`, a one-shot promise that resolves when `SessionWatcher.onNewSession` fires. Added `scanForNewFiles()` as a lightweight backup scan (every 3s) for when `FileSystemWatcher` doesn't fire. 60s timeout safety net.
+
 ## Low Priority — Relay Hygiene (NIP-40 Expiration)
 
 - [ ] **Add 1-hour expiration to history response events** — `nostrRelay.ts:publishHistory()` — Add `['expiration', ...]` tag to kind 29515 history events (`['t', 'history']`). These are one-shot catch-up payloads, pure waste after delivery. Easiest win.

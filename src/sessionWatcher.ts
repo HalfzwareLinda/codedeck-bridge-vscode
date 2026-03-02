@@ -524,6 +524,45 @@ export class SessionWatcher implements vscode.Disposable {
     this.scanAllSessions();
   }
 
+  /**
+   * Lightweight scan for NEW .jsonl files not yet in fileOffsets.
+   * Unlike scanAllSessions(), this only indexes previously-unknown files
+   * and fires onNewSession for each one. Fast enough to call every few
+   * seconds as a backup when FileSystemWatcher doesn't fire.
+   */
+  scanForNewFiles(): void {
+    try {
+      const projectDirs = fs.readdirSync(this.claudeDir);
+      for (const dir of projectDirs) {
+        const projectPath = path.join(this.claudeDir, dir);
+        try {
+          const stat = fs.statSync(projectPath);
+          if (!stat.isDirectory()) { continue; }
+        } catch { continue; }
+
+        const files = fs.readdirSync(projectPath).filter(f => f.endsWith('.jsonl'));
+        for (const file of files) {
+          const filePath = path.join(projectPath, file);
+          if (filePath.includes('/subagents/')) { continue; }
+          if (this.fileOffsets.has(filePath)) { continue; }
+
+          // New file — index from the beginning
+          this.fileOffsets.set(filePath, 0);
+          this.indexSession(filePath);
+
+          const meta = this.sessionMeta.get(filePath);
+          if (meta) {
+            this.emitSessionList();
+            this.events.onNewSession?.(meta.sessionId, meta.cwd);
+            this.readNewLines(filePath);
+          }
+        }
+      }
+    } catch (err) {
+      console.error('[Codedeck] Error scanning for new files:', err);
+    }
+  }
+
   getSessions(): RemoteSessionInfo[] {
     const sessions: RemoteSessionInfo[] = [];
     const now = Date.now();
