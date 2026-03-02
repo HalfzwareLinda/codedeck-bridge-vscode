@@ -35,6 +35,11 @@ export class SessionWatcher implements vscode.Disposable {
   private workspaceCwd: string | undefined;
   private pollInterval: NodeJS.Timeout | null = null;
   private emitDebounceTimer: NodeJS.Timeout | null = null;
+  private pollCount = 0;
+  private fastScanInterval: NodeJS.Timeout | null = null;
+  private fastScanTimeout: NodeJS.Timeout | null = null;
+
+  private static readonly NEW_FILE_SCAN_EVERY_N_POLLS = 3; // scan for new files every 3rd poll (every 6s)
 
   constructor(events: SessionWatcherEvents, workspaceCwd?: string) {
     this.events = events;
@@ -243,14 +248,16 @@ export class SessionWatcher implements vscode.Disposable {
         const stat = fs.statSync(filePath);
         this.fileOffsets.set(filePath, stat.size);
       }
-    } catch {
-      // File may be in use or corrupted, skip
+    } catch (err) {
+      console.log(`[Codedeck] indexSession failed for ${path.basename(filePath)}: ${err}`);
     }
   }
 
   private onFileCreated(filePath: string): void {
     if (!filePath.endsWith('.jsonl')) { return; }
     if (filePath.includes('/subagents/')) { return; }
+
+    console.log(`[Codedeck] FileSystemWatcher onFileCreated: ${path.basename(filePath)}`);
 
     // New session file — index it and start from beginning.
     // With fallbackCwd, indexSession succeeds even if only queue-operation
@@ -262,7 +269,10 @@ export class SessionWatcher implements vscode.Disposable {
 
     const meta = this.sessionMeta.get(filePath);
     if (meta) {
+      console.log(`[Codedeck] onFileCreated: indexed ${meta.sessionId}, firing onNewSession`);
       this.events.onNewSession?.(meta.sessionId, meta.cwd);
+    } else {
+      console.log(`[Codedeck] onFileCreated: indexing failed for ${path.basename(filePath)} — will retry via poll`);
     }
 
     this.readNewLines(filePath);
@@ -272,6 +282,7 @@ export class SessionWatcher implements vscode.Disposable {
     if (!filePath.endsWith('.jsonl')) { return; }
     if (filePath.includes('/subagents/')) { return; }
 
+    console.log(`[Codedeck] FileSystemWatcher onFileChanged: ${path.basename(filePath)}`);
     this.readNewLines(filePath);
   }
 
@@ -399,6 +410,11 @@ export class SessionWatcher implements vscode.Disposable {
   }
 
   private pollActiveFiles(): void {
+    this.pollCount++;
+    if (this.pollCount % SessionWatcher.NEW_FILE_SCAN_EVERY_N_POLLS === 0) {
+      this.scanForNewFiles();
+    }
+
     for (const filePath of [...this.fileOffsets.keys()]) {
       try {
         const stat = fs.statSync(filePath);
@@ -547,16 +563,34 @@ export class SessionWatcher implements vscode.Disposable {
           if (this.fileOffsets.has(filePath)) { continue; }
 
           // New file — index from the beginning
+          console.log(`[Codedeck] scanForNewFiles discovered: ${file}`);
           this.fileOffsets.set(filePath, 0);
           this.indexSession(filePath);
 
           const meta = this.sessionMeta.get(filePath);
           if (meta) {
+            console.log(`[Codedeck] scanForNewFiles: new session ${meta.sessionId}`);
             this.emitSessionList();
             this.events.onNewSession?.(meta.sessionId, meta.cwd);
             this.readNewLines(filePath);
           }
         }
+      }
+      // Recovery pass: retry files we track but failed to index (e.g. file was empty on creation)
+      for (const filePath of this.fileOffsets.keys()) {
+        if (this.sessionMeta.has(filePath)) { continue; }
+        try {
+          const stat = fs.statSync(filePath);
+          if (stat.size > 0) {
+            this.indexSession(filePath);
+            if (this.sessionMeta.has(filePath)) {
+              const meta = this.sessionMeta.get(filePath)!;
+              console.log(`[Codedeck] scanForNewFiles: recovered half-indexed ${meta.sessionId}`);
+              this.emitSessionList();
+              this.events.onNewSession?.(meta.sessionId, meta.cwd);
+            }
+          }
+        } catch { /* file may have been deleted */ }
       }
     } catch (err) {
       console.error('[Codedeck] Error scanning for new files:', err);
@@ -638,6 +672,29 @@ export class SessionWatcher implements vscode.Disposable {
     }, 500);
   }
 
+  /**
+   * Temporarily scan for new files every `intervalMs` (default 1s).
+   * Used during pending session creation for rapid detection.
+   * Auto-stops after `maxDurationMs` (default 30s).
+   */
+  startFastScan(intervalMs = 1000, maxDurationMs = 30_000): void {
+    if (this.fastScanInterval) { return; } // already running
+    console.log(`[Codedeck] Starting fast scan (every ${intervalMs}ms, up to ${maxDurationMs / 1000}s)`);
+    this.fastScanInterval = setInterval(() => this.scanForNewFiles(), intervalMs);
+    this.fastScanTimeout = setTimeout(() => this.stopFastScan(), maxDurationMs);
+  }
+
+  stopFastScan(): void {
+    if (this.fastScanInterval) {
+      clearInterval(this.fastScanInterval);
+      this.fastScanInterval = null;
+    }
+    if (this.fastScanTimeout) {
+      clearTimeout(this.fastScanTimeout);
+      this.fastScanTimeout = null;
+    }
+  }
+
   dispose(): void {
     if (this.watcher) {
       this.watcher.dispose();
@@ -651,5 +708,6 @@ export class SessionWatcher implements vscode.Disposable {
       clearTimeout(this.emitDebounceTimer);
       this.emitDebounceTimer = null;
     }
+    this.stopFastScan();
   }
 }

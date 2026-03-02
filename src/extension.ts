@@ -78,7 +78,6 @@ export function activate(context: vscode.ExtensionContext): void {
         log('[Codedeck] Claude Code terminal opened');
       },
       notifyNoTerminal,
-      getPendingId: (sessionId) => terminalRegistry.getPendingId(sessionId),
       clearPendingId: (pendingId) => terminalRegistry.clearPendingId(pendingId),
     },
     log,
@@ -120,8 +119,8 @@ export function activate(context: vscode.ExtensionContext): void {
       bridgeCore?.onSessionListChanged(sessions);
     },
     onNewSession: (sessionId, cwd) => {
-      terminalRegistry.onNewSession(sessionId, cwd);
-      bridgeCore?.onNewSession(sessionId, cwd);
+      const pendingId = terminalRegistry.onNewSession(sessionId, cwd);
+      bridgeCore?.onNewSession(sessionId, cwd, pendingId);
     },
     onExistingSession: (sessionId, cwd) => {
       terminalRegistry.mapExistingSession(sessionId, cwd);

@@ -4,6 +4,8 @@
 
 - [x] **Event-driven new session detection** — Replaced the polling loop in `core.ts:waitForNewSession()` with `awaitNewSession()`, a one-shot promise that resolves when `SessionWatcher.onNewSession` fires. Added `scanForNewFiles()` as a lightweight backup scan (every 3s) for when `FileSystemWatcher` doesn't fire. 60s timeout safety net.
 
+- [x] **Snapshot-diff session detection (v3)** — The event-driven approach still failed because `onNewSession` callback never fired when `FileSystemWatcher` missed the new file or `indexSession` failed on an empty file. Fix: `onCreateSession` now snapshots all known session IDs, starts a 2s diff-polling interval that calls `scanForNewFiles()` + `findNewSessionNotIn(snapshot)`, and resolves via `resolvePendingSession()`. Three independent detection paths now race: (1) `onNewSession` callback via FileSystemWatcher, (2) `onNewSession` via `scanForNewFiles` fast scan, (3) snapshot-diff polling. Also added half-indexed file recovery in `scanForNewFiles` and diagnostic logging throughout.
+
 ## Low Priority — Relay Hygiene (NIP-40 Expiration)
 
 - [ ] **Add 1-hour expiration to history response events** — `nostrRelay.ts:publishHistory()` — Add `['expiration', ...]` tag to kind 29515 history events (`['t', 'history']`). These are one-shot catch-up payloads, pure waste after delivery. Easiest win.

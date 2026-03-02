@@ -115,8 +115,8 @@ export class TerminalRegistry implements vscode.Disposable {
    *
    * Also flushes any pending input queued for that session.
    */
-  onNewSession(sessionId: string, cwd: string): void {
-    if (this.sessionTerminals.has(sessionId)) { return; }
+  onNewSession(sessionId: string, cwd: string): string | undefined {
+    if (this.sessionTerminals.has(sessionId)) { return undefined; }
 
     // 1. Check pendingTerminals first — strongest signal (deterministic match)
     for (const [pendingId, terminal] of this.pendingTerminals) {
@@ -129,7 +129,7 @@ export class TerminalRegistry implements vscode.Disposable {
         this.sessionTerminals.set(sessionId, terminal);
         this.pendingTerminals.delete(pendingId);
         this.flushPendingInputs(sessionId, terminal);
-        return;
+        return pendingId;
       }
     }
 
@@ -158,6 +158,7 @@ export class TerminalRegistry implements vscode.Disposable {
       this.sessionTerminals.set(sessionId, matched);
       this.flushPendingInputs(sessionId, matched);
     }
+    return undefined;
   }
 
   /**
@@ -241,23 +242,6 @@ export class TerminalRegistry implements vscode.Disposable {
       }, 5_000);
     }
     await this.ensureClaudeTerminal();
-  }
-
-  /**
-   * Look up the pendingId for a session by matching the terminal's identity.
-   * Called by core.ts when SessionWatcher detects a new JSONL file.
-   */
-  getPendingId(sessionId: string): string | undefined {
-    const terminal = this.sessionTerminals.get(sessionId);
-    if (!terminal) { return undefined; }
-
-    // Search pendingTerminals for the same terminal object
-    for (const [pendingId, pendingTerminal] of this.pendingTerminals) {
-      if (pendingTerminal === terminal) {
-        return pendingId;
-      }
-    }
-    return undefined;
   }
 
   /**

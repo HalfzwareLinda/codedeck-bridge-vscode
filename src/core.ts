@@ -25,7 +25,6 @@ export interface TerminalSender {
   sendText: (text: string, sessionId?: string, addNewline?: boolean) => Promise<boolean>;
   createSession: (pendingId?: string) => Promise<void>;
   notifyNoTerminal: () => void;
-  getPendingId?: (sessionId: string) => string | undefined;
   clearPendingId?: (pendingId: string) => void;
 }
 
@@ -36,8 +35,13 @@ export interface SessionProvider {
   getHistoryCount: (sessionId: string) => number;
   rescanSessions?: () => void;
   getAllSessionIds?: () => string[];
+  /** Find the newest session whose ID is not in `excludeIds`. */
+  findNewSessionNotIn?: (excludeIds: Set<string>) => RemoteSessionInfo | null;
   /** Lightweight scan for new session files not yet indexed. */
   scanForNewFiles?: () => void;
+  /** Temporarily increase scan frequency for rapid new-session detection. */
+  startFastScan?: (intervalMs?: number, maxDurationMs?: number) => void;
+  stopFastScan?: () => void;
 }
 
 /**
@@ -49,8 +53,13 @@ export class BridgeCore {
   private terminal: TerminalSender;
   private sessionProvider: SessionProvider | null = null;
 
-  /** Non-blocking pending session tracking: pendingId → timeout handle. */
-  private pendingSessions: Map<string, { pendingId: string; timeoutHandle: ReturnType<typeof setTimeout> }> = new Map();
+  /** Non-blocking pending session tracking: pendingId → timeout + diff polling handles. */
+  private pendingSessions: Map<string, {
+    pendingId: string;
+    timeoutHandle: ReturnType<typeof setTimeout>;
+    diffInterval?: ReturnType<typeof setInterval>;
+    snapshotIds?: Set<string>;
+  }> = new Map();
   private static readonly PENDING_SESSION_TIMEOUT_MS = 30_000;
 
   constructor(config: BridgeCoreConfig, terminal: TerminalSender, private log: (msg: string) => void = console.log) {
@@ -68,6 +77,10 @@ export class BridgeCore {
         const pendingId = crypto.randomUUID();
         this.log(`[Codedeck] Create session request received, pendingId=${pendingId}`);
 
+        // Snapshot known session IDs BEFORE opening the terminal
+        const snapshotIds = new Set(this.sessionProvider?.getAllSessionIds?.() ?? []);
+        this.log(`[Codedeck] Snapshot: ${snapshotIds.size} existing sessions`);
+
         try {
           // Await the terminal open (~200ms) — confirms the command succeeded
           await this.terminal.createSession(pendingId);
@@ -76,17 +89,34 @@ export class BridgeCore {
           // Publish session-pending (sub-second, terminal confirmed open)
           await this.relay.publishSessionPending(pendingId);
 
+          // Start fast scanning to detect the new JSONL file quickly
+          this.sessionProvider?.startFastScan?.(1000, 30_000);
+
+          // Active snapshot-diff polling — fallback when onNewSession callback doesn't fire
+          const diffInterval = setInterval(() => {
+            if (!this.pendingSessions.has(pendingId)) { return; }
+            this.sessionProvider?.scanForNewFiles?.();
+            const newSession = this.sessionProvider?.findNewSessionNotIn?.(snapshotIds);
+            if (newSession) {
+              this.log(`[Codedeck] Snapshot-diff: found new session ${newSession.id} for pending ${pendingId}`);
+              this.resolvePendingSession(pendingId, newSession);
+            }
+          }, 2000);
+
           // Start 30s timeout → publish session-failed('timeout')
           const timeoutHandle = setTimeout(() => {
             this.log(`[Codedeck] Pending session ${pendingId} timed out after ${BridgeCore.PENDING_SESSION_TIMEOUT_MS / 1000}s`);
+            const pending = this.pendingSessions.get(pendingId);
+            if (pending?.diffInterval) { clearInterval(pending.diffInterval); }
             this.pendingSessions.delete(pendingId);
             this.terminal.clearPendingId?.(pendingId);
+            this.sessionProvider?.stopFastScan?.();
             this.relay.publishSessionFailed(pendingId, 'timeout').catch(err => {
               this.log(`[Codedeck] Failed to publish session-failed: ${err}`);
             });
           }, BridgeCore.PENDING_SESSION_TIMEOUT_MS);
 
-          this.pendingSessions.set(pendingId, { pendingId, timeoutHandle });
+          this.pendingSessions.set(pendingId, { pendingId, timeoutHandle, diffInterval, snapshotIds });
 
           // Return immediately — no blocking await
         } catch (err) {
@@ -168,37 +198,59 @@ export class BridgeCore {
 
   /**
    * Called by extension.ts when SessionWatcher detects a new session file.
-   * If there's a matching pendingId (via terminal identity), publish session-ready
-   * and clear the timeout. Otherwise just publish the session list.
+   * If there's a matching pendingId (passed from TerminalRegistry), publish
+   * session-ready and clear the timeout. Otherwise just publish the session list.
    */
-  onNewSession(sessionId: string, cwd: string): void {
-    // Look up pendingId via terminal identity
-    const pendingId = this.terminal.getPendingId?.(sessionId);
-
+  onNewSession(sessionId: string, cwd: string, pendingId?: string): void {
     if (pendingId && this.pendingSessions.has(pendingId)) {
-      const pending = this.pendingSessions.get(pendingId)!;
-      clearTimeout(pending.timeoutHandle);
-      this.pendingSessions.delete(pendingId);
-      this.terminal.clearPendingId?.(pendingId);
-
       // Find the real session info
       const sessions = this.sessionProvider?.getSessions() ?? [];
       const session = sessions.find(s => s.id === sessionId);
 
       if (session) {
-        this.log(`[Codedeck] New session ${sessionId} matched pendingId ${pendingId} — publishing session-ready`);
-        this.relay.publishSessionReady(pendingId, session).catch(err => {
-          this.log(`[Codedeck] Failed to publish session-ready: ${err}`);
-        });
+        this.resolvePendingSession(pendingId, session);
+      } else {
+        // Session not in list yet — publish list update only
+        this.onSessionListChanged(sessions);
       }
-
-      // Also publish the updated session list
-      this.onSessionListChanged(sessions);
     } else {
-      // No pendingId match — user opened terminal manually, just publish session list
+      // No pendingId match — check if any pending session's snapshot is missing this ID
+      // (handles the case where TerminalRegistry couldn't match but we know it's new)
+      for (const [pid, pending] of this.pendingSessions) {
+        if (pending.snapshotIds && !pending.snapshotIds.has(sessionId)) {
+          const sessions = this.sessionProvider?.getSessions() ?? [];
+          const session = sessions.find(s => s.id === sessionId);
+          if (session) {
+            this.log(`[Codedeck] onNewSession: snapshot-diff matched ${sessionId} to pending ${pid}`);
+            this.resolvePendingSession(pid, session);
+            return;
+          }
+        }
+      }
+      // No pending match — user opened terminal manually, just publish session list
       const sessions = this.sessionProvider?.getSessions() ?? [];
       this.onSessionListChanged(sessions);
     }
+  }
+
+  /**
+   * Resolve a pending session: publish session-ready, clear timeout and polling.
+   */
+  private resolvePendingSession(pendingId: string, session: RemoteSessionInfo): void {
+    const pending = this.pendingSessions.get(pendingId);
+    if (!pending) { return; }
+
+    clearTimeout(pending.timeoutHandle);
+    if (pending.diffInterval) { clearInterval(pending.diffInterval); }
+    this.pendingSessions.delete(pendingId);
+    this.sessionProvider?.stopFastScan?.();
+
+    this.log(`[Codedeck] Session ${session.id} matched pendingId ${pendingId} — publishing session-ready`);
+    this.relay.publishSessionReady(pendingId, session).catch(err => {
+      this.log(`[Codedeck] Failed to publish session-ready: ${err}`);
+    });
+
+    this.onSessionListChanged(this.sessionProvider?.getSessions() ?? []);
   }
 
   /** Connect to Nostr relays if phones are paired. */
@@ -208,9 +260,10 @@ export class BridgeCore {
 
   /** Disconnect from Nostr relays. */
   disconnect(): void {
-    // Clean up all pending session timeouts
+    // Clean up all pending session timeouts and diff intervals
     for (const [, pending] of this.pendingSessions) {
       clearTimeout(pending.timeoutHandle);
+      if (pending.diffInterval) { clearInterval(pending.diffInterval); }
     }
     this.pendingSessions.clear();
     this.relay.disconnect();
