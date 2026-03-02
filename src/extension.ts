@@ -48,7 +48,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // --- Read configuration ---
   const config = vscode.workspace.getConfiguration('codedeck');
-  const relays = config.get<string[]>('relays', ['wss://relay.damus.io', 'wss://nos.lol']);
+  const relays = config.get<string[]>('relays', ['wss://relay.nos.social', 'wss://relay.primal.net', 'wss://nos.lol']);
   const machineName = config.get<string>('machineName', '') || os.hostname();
 
   // --- Load paired phones ---
@@ -246,7 +246,7 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration(e => {
       if (e.affectsConfiguration('codedeck.relays')) {
-        const newRelays = vscode.workspace.getConfiguration('codedeck').get<string[]>('relays', ['wss://relay.damus.io', 'wss://nos.lol']);
+        const newRelays = vscode.workspace.getConfiguration('codedeck').get<string[]>('relays', ['wss://relay.nos.social', 'wss://relay.primal.net', 'wss://nos.lol']);
         statusBar?.setOffline(); // Transitional state while reconnecting
         bridgeCore?.relay.updateRelays(newRelays);
         console.log('[Codedeck] Relays updated:', newRelays);

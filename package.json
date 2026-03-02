@@ -39,7 +39,8 @@
         "codedeck.relays": {
           "type": "array",
           "default": [
-            "wss://relay.damus.io",
+            "wss://relay.nos.social",
+            "wss://relay.primal.net",
             "wss://nos.lol"
           ],
           "description": "Nostr relay URLs for phone communication"
