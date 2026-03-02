@@ -33,6 +33,8 @@ export interface SessionProvider {
   loadFullHistory: (sessionId: string) => Array<{ seq: number; entry: OutputEntry }>;
   getHistoryCount: (sessionId: string) => number;
   rescanSessions?: () => void;
+  getAllSessionIds?: () => string[];
+  findNewSessionNotIn?: (excludeIds: Set<string>) => RemoteSessionInfo | null;
 }
 
 /**
@@ -58,9 +60,11 @@ export class BridgeCore {
       onCreateSession: async () => {
         try {
           this.log('[Codedeck] Create session request received');
-          const beforeIds = new Set(
-            this.sessionProvider?.getSessions().map(s => s.id) ?? []
-          );
+          // Snapshot ALL session IDs (not just top 15 from getSessions)
+          const allIds = this.sessionProvider?.getAllSessionIds?.();
+          const beforeIds = allIds
+            ? new Set(allIds)
+            : new Set(this.sessionProvider?.getSessions().map(s => s.id) ?? []);
           this.log(`[Codedeck] beforeIds: ${beforeIds.size} sessions`);
           await this.terminal.createSession();
           this.log('[Codedeck] createSession resolved, starting poll...');
@@ -151,11 +155,11 @@ export class BridgeCore {
       return;
     }
 
-    const MAX_ATTEMPTS = 15;
+    const MAX_ATTEMPTS = 45;
     const INTERVAL_MS = 1_000;
     let attempts = 0;
 
-    this.log(`[Codedeck] waitForNewSession: starting poll (beforeIds: ${[...beforeIds].join(', ') || 'none'})`);
+    this.log(`[Codedeck] waitForNewSession: starting poll (${beforeIds.size} existing sessions, timeout ${MAX_ATTEMPTS}s)`);
 
     const check = () => {
       attempts++;
@@ -163,17 +167,33 @@ export class BridgeCore {
       if (attempts % 3 === 0) {
         this.sessionProvider?.rescanSessions?.();
       }
-      const sessions = this.sessionProvider?.getSessions() ?? [];
-      this.log(`[Codedeck] waitForNewSession: attempt ${attempts}/${MAX_ATTEMPTS}, found ${sessions.length} sessions`);
-      const newSession = sessions.find(s => !beforeIds.has(s.id));
 
-      if (newSession) {
-        this.log(`[Codedeck] New session detected: ${newSession.slug} (${newSession.id}) — force-publishing session list`);
+      // Search ALL indexed sessions (no 15-cap) for one not in beforeIds
+      const found = this.sessionProvider?.findNewSessionNotIn?.(beforeIds) ?? null;
+      if (found) {
+        this.log(`[Codedeck] New session detected: ${found.slug} (${found.id}) after ${attempts}s — force-publishing session list`);
+        const sessions = this.sessionProvider?.getSessions() ?? [];
         this.onSessionListChanged(sessions);
         return;
       }
 
+      // Fallback for providers without findNewSessionNotIn
+      if (!this.sessionProvider?.findNewSessionNotIn) {
+        const sessions = this.sessionProvider?.getSessions() ?? [];
+        const newSession = sessions.find(s => !beforeIds.has(s.id));
+        if (newSession) {
+          this.log(`[Codedeck] New session detected: ${newSession.slug} (${newSession.id}) after ${attempts}s — force-publishing session list`);
+          this.onSessionListChanged(sessions);
+          return;
+        }
+      }
+
+      if (attempts % 5 === 0) {
+        this.log(`[Codedeck] waitForNewSession: attempt ${attempts}/${MAX_ATTEMPTS}, no new session yet`);
+      }
+
       if (attempts >= MAX_ATTEMPTS) {
+        const sessions = this.sessionProvider?.getSessions() ?? [];
         this.log(`[Codedeck] Timed out waiting for new session after ${MAX_ATTEMPTS}s — publishing ${sessions.length} existing sessions`);
         this.onSessionListChanged(sessions);
         return;

@@ -553,6 +553,43 @@ export class SessionWatcher implements vscode.Disposable {
     return sessions.slice(0, MAX_SESSIONS);
   }
 
+  /** Return ALL indexed session IDs (no cap). */
+  getAllSessionIds(): string[] {
+    return [...this.sessionMeta.values()].map(m => m.sessionId);
+  }
+
+  /**
+   * Find the newest indexed session whose ID is not in `excludeIds`.
+   * Searches ALL sessionMeta entries (no 15-cap), so detection works
+   * regardless of how many sessions exist.
+   */
+  findNewSessionNotIn(excludeIds: Set<string>): RemoteSessionInfo | null {
+    let newest: { info: RemoteSessionInfo; mtimeMs: number } | null = null;
+
+    for (const [filePath, meta] of this.sessionMeta) {
+      if (excludeIds.has(meta.sessionId)) { continue; }
+      try {
+        const stat = fs.statSync(filePath);
+        const info: RemoteSessionInfo = {
+          id: meta.sessionId,
+          slug: meta.slug,
+          cwd: meta.cwd,
+          lastActivity: stat.mtime.toISOString(),
+          lineCount: this.fileOffsets.get(filePath) ?? 0,
+          title: meta.title ?? null,
+          project: this.resolveProjectName(meta, filePath),
+        };
+        if (!newest || stat.mtimeMs > newest.mtimeMs) {
+          newest = { info, mtimeMs: stat.mtimeMs };
+        }
+      } catch {
+        // File gone
+      }
+    }
+
+    return newest?.info ?? null;
+  }
+
   private emitSessionList(): void {
     // Debounce: coalesce rapid-fire calls (e.g. during startup scan) into one publish
     if (this.emitDebounceTimer) { clearTimeout(this.emitDebounceTimer); }
