@@ -55,10 +55,12 @@ export class NostrRelay {
   private outputQueue: Array<{ sessionId: string; seq: number; entry: OutputEntry }> = [];
   private outputFlushTimer: ReturnType<typeof setTimeout> | null = null;
   private static readonly OUTPUT_FLUSH_INTERVAL_MS = 1_000;
+  private static readonly OUTPUT_INTER_EVENT_DELAY_MS = 100;
+  private static readonly MAX_EVENTS_PER_FLUSH = 5;
 
-  // --- Session list publish priority ---
-  // Pause output flushing while a session list publish is in progress.
-  private sessionListPublishing = false;
+  // --- Output publish priority ---
+  // Pause output flushing while a high-priority publish is in progress.
+  private outputPaused = false;
 
   // --- Session list publish debounce ---
   // Coalesce rapid-fire publishSessionList calls (e.g. activation + oneose)
@@ -235,7 +237,7 @@ export class NostrRelay {
   /** Publish with retry logic. */
   private async doPublishSessionListWithRetry(sessions: RemoteSessionInfo[]): Promise<void> {
     // Pause output flushing so session list gets relay bandwidth priority
-    this.sessionListPublishing = true;
+    this.outputPaused = true;
 
     try {
       const allFailed = await this.doPublishSessionList(sessions);
@@ -249,7 +251,7 @@ export class NostrRelay {
         }
       }
     } finally {
-      this.sessionListPublishing = false;
+      this.outputPaused = false;
     }
   }
 
@@ -340,11 +342,11 @@ export class NostrRelay {
     }
   }
 
-  /** Flush queued output entries to relays. Skipped while session list is publishing. */
-  private flushOutputQueue(): void {
-    // Defer if a session list publish is in progress (give it relay bandwidth)
-    if (this.sessionListPublishing) {
-      this.log(`[Codedeck] flushOutputQueue: deferred (session list publishing), ${this.outputQueue.length} entries queued`);
+  /** Flush queued output entries to relays. Skipped while high-priority publish is in progress. */
+  private async flushOutputQueue(): Promise<void> {
+    // Defer if a high-priority publish is in progress (give it relay bandwidth)
+    if (this.outputPaused) {
+      this.log(`[Codedeck] flushOutputQueue: deferred (priority publish in progress), ${this.outputQueue.length} entries queued`);
       if (this.outputQueue.length > 0 && !this.outputFlushTimer) {
         this.outputFlushTimer = setTimeout(() => {
           this.outputFlushTimer = null;
@@ -356,10 +358,14 @@ export class NostrRelay {
 
     if (!this.pool || this.pairedPhones.length === 0 || this.outputQueue.length === 0) { return; }
 
-    const batch = this.outputQueue.splice(0);
-    this.log(`[Codedeck] flushOutputQueue: sending ${batch.length} entries to ${this.pairedPhones.length} phones`);
+    // Take at most MAX_EVENTS_PER_FLUSH entries to avoid burning through rate limits
+    const count = Math.min(this.outputQueue.length, NostrRelay.MAX_EVENTS_PER_FLUSH);
+    const batch = this.outputQueue.splice(0, count);
+    const remaining = this.outputQueue.length;
+    this.log(`[Codedeck] flushOutputQueue: sending ${batch.length} entries to ${this.pairedPhones.length} phones${remaining > 0 ? ` (${remaining} remaining)` : ''}`);
 
-    for (const { sessionId, seq, entry } of batch) {
+    for (let idx = 0; idx < batch.length; idx++) {
+      const { sessionId, seq, entry } = batch[idx];
       const msg: BridgeOutbound = {
         type: 'output',
         sessionId,
@@ -397,6 +403,19 @@ export class NostrRelay {
           console.error(`[Codedeck] Failed to publish output to ${phone.label}:`, err);
         }
       }
+
+      // Inter-event delay to avoid relay rate-limiting (skip after last entry)
+      if (idx < batch.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, NostrRelay.OUTPUT_INTER_EVENT_DELAY_MS));
+      }
+    }
+
+    // If there are remaining entries, schedule the next flush
+    if (this.outputQueue.length > 0 && !this.outputFlushTimer) {
+      this.outputFlushTimer = setTimeout(() => {
+        this.outputFlushTimer = null;
+        this.flushOutputQueue();
+      }, NostrRelay.OUTPUT_FLUSH_INTERVAL_MS);
     }
   }
 
@@ -404,45 +423,69 @@ export class NostrRelay {
 
   /**
    * Publish a message to all paired phones using OUTPUT_EVENT_KIND with NIP-40 expiration.
-   * Used for session-pending/ready/failed messages that are short-lived.
+   * Pauses output flushing during publish. Retries with exponential backoff if all relays reject.
+   * Returns true if at least one relay accepted the event.
    */
-  private async publishToAllPhones(msg: BridgeOutbound, expirationSecs: number): Promise<void> {
-    if (!this.pool || this.pairedPhones.length === 0) { return; }
+  private async publishToAllPhones(msg: BridgeOutbound, expirationSecs: number, retries: number = 0): Promise<boolean> {
+    if (!this.pool || this.pairedPhones.length === 0) { return false; }
 
-    const json = JSON.stringify(msg);
-    const expiration = String(Math.floor(Date.now() / 1000) + expirationSecs);
+    this.outputPaused = true;
+    try {
+      for (let attempt = 0; attempt <= retries; attempt++) {
+        if (!this.pool) { return false; }
 
-    for (const phone of this.pairedPhones) {
-      if (!this.pool) { return; }
-      try {
-        const conversationKey = getConversationKey(this.secretKey, phone.pubkeyHex);
-        const ciphertext = encrypt(json, conversationKey);
+        const json = JSON.stringify(msg);
+        const expiration = String(Math.floor(Date.now() / 1000) + expirationSecs);
+        let anySuccess = false;
 
-        const event = finalizeEvent({
-          kind: OUTPUT_EVENT_KIND,
-          created_at: Math.floor(Date.now() / 1000),
-          tags: [
-            ['p', phone.pubkeyHex],
-            ['expiration', expiration],
-          ],
-          content: ciphertext,
-        }, this.secretKey);
+        for (const phone of this.pairedPhones) {
+          if (!this.pool) { return anySuccess; }
+          try {
+            const conversationKey = getConversationKey(this.secretKey, phone.pubkeyHex);
+            const ciphertext = encrypt(json, conversationKey);
 
-        const results = this.pool.publish(this.relays, event);
-        for (let i = 0; i < results.length; i++) {
-          results[i].catch((err: unknown) => {
-            const msg2 = err instanceof Error ? err.message : String(err);
-            console.warn(`[Codedeck] Relay ${this.relays[i]}: publish failed: ${msg2}`);
-          });
+            const event = finalizeEvent({
+              kind: OUTPUT_EVENT_KIND,
+              created_at: Math.floor(Date.now() / 1000),
+              tags: [
+                ['p', phone.pubkeyHex],
+                ['expiration', expiration],
+              ],
+              content: ciphertext,
+            }, this.secretKey);
+
+            const results = this.pool.publish(this.relays, event);
+            const outcomes = await Promise.allSettled(results);
+            for (let i = 0; i < outcomes.length; i++) {
+              if (outcomes[i].status === 'fulfilled') {
+                anySuccess = true;
+              } else {
+                const msg2 = (outcomes[i] as PromiseRejectedResult).reason;
+                const errStr = msg2 instanceof Error ? msg2.message : String(msg2);
+                console.warn(`[Codedeck] Relay ${this.relays[i]}: publish failed: ${errStr}`);
+              }
+            }
+          } catch (err) {
+            console.error(`[Codedeck] Failed to publish to ${phone.label}:`, err);
+          }
         }
-      } catch (err) {
-        console.error(`[Codedeck] Failed to publish to ${phone.label}:`, err);
+
+        if (anySuccess) { return true; }
+
+        if (attempt < retries) {
+          const delay = 2_000 * Math.pow(2, attempt); // 2s, 4s
+          this.log(`[Codedeck] Publish failed on all relays — retry ${attempt + 1}/${retries} in ${delay}ms`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
       }
+      return false;
+    } finally {
+      this.outputPaused = false;
     }
   }
 
   /** Publish session-pending acknowledgment (NIP-40: expires in 2 minutes). */
-  async publishSessionPending(pendingId: string): Promise<void> {
+  async publishSessionPending(pendingId: string): Promise<boolean> {
     const msg: SessionPendingMessage = {
       type: 'session-pending',
       pendingId,
@@ -450,29 +493,29 @@ export class NostrRelay {
       createdAt: new Date().toISOString(),
     };
     this.log(`[Codedeck] Publishing session-pending: ${pendingId}`);
-    await this.publishToAllPhones(msg, 120);
+    return this.publishToAllPhones(msg, 120);
   }
 
   /** Publish session-ready upgrade with real session info (NIP-40: expires in 1 minute). */
-  async publishSessionReady(pendingId: string, session: RemoteSessionInfo): Promise<void> {
+  async publishSessionReady(pendingId: string, session: RemoteSessionInfo): Promise<boolean> {
     const msg: SessionReadyMessage = {
       type: 'session-ready',
       pendingId,
       session,
     };
     this.log(`[Codedeck] Publishing session-ready: ${pendingId} → ${session.id}`);
-    await this.publishToAllPhones(msg, 60);
+    return this.publishToAllPhones(msg, 60, 2);
   }
 
   /** Publish session-failed with reason (NIP-40: expires in 1 minute). */
-  async publishSessionFailed(pendingId: string, reason: string): Promise<void> {
+  async publishSessionFailed(pendingId: string, reason: string): Promise<boolean> {
     const msg: SessionFailedMessage = {
       type: 'session-failed',
       pendingId,
       reason,
     };
     this.log(`[Codedeck] Publishing session-failed: ${pendingId} (${reason})`);
-    await this.publishToAllPhones(msg, 60);
+    return this.publishToAllPhones(msg, 60);
   }
 
   private static readonly HISTORY_CHUNK_SIZE = 20;

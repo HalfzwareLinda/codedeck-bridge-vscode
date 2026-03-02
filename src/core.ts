@@ -23,7 +23,7 @@ export interface BridgeCoreConfig {
 }
 
 export interface TerminalSender {
-  sendText: (text: string, sessionId?: string, addNewline?: boolean) => Promise<boolean>;
+  sendText: (text: string, sessionId?: string) => Promise<boolean>;
   /** Spawn a new Claude Code terminal with a specific session ID. Returns immediately. */
   createSession: (sessionId: string, cwd?: string) => void;
   notifyNoTerminal: () => void;
@@ -71,6 +71,10 @@ export class BridgeCore {
           // (phone expects pending → ready sequence for its UI)
           await this.relay.publishSessionPending(sessionId);
 
+          // Wait for the phone to process the pending placeholder and for relays
+          // to cool down (rate-limiting causes session-ready to be dropped otherwise)
+          await new Promise(resolve => setTimeout(resolve, 1_000));
+
           // Build session info from workspace path
           const cwd = this.workspaceCwd || 'workspace';
           const project = cwd.split('/').pop() || cwd;
@@ -84,9 +88,12 @@ export class BridgeCore {
             project,
           };
 
-          // Publish session-ready immediately — no waiting, no polling
+          // Publish session-ready (retries with backoff if rate-limited)
           this.log(`[Codedeck] Publishing session-ready for ${sessionId}`);
-          await this.relay.publishSessionReady(sessionId, session);
+          const success = await this.relay.publishSessionReady(sessionId, session);
+          if (!success) {
+            this.log(`[Codedeck] WARNING: session-ready for ${sessionId} failed on all relays after retries`);
+          }
         } catch (err) {
           this.log(`[Codedeck] Terminal spawn failed for ${sessionId}: ${err}`);
           await this.relay.publishSessionFailed(sessionId, 'terminal-failed');
