@@ -59,6 +59,7 @@ export class BridgeCore {
     timeoutHandle: ReturnType<typeof setTimeout>;
     diffInterval?: ReturnType<typeof setInterval>;
     snapshotIds?: Set<string>;
+    createdAt?: number;
   }> = new Map();
   private static readonly PENDING_SESSION_TIMEOUT_MS = 30_000;
 
@@ -79,7 +80,7 @@ export class BridgeCore {
 
         // Snapshot known session IDs BEFORE opening the terminal
         const snapshotIds = new Set(this.sessionProvider?.getAllSessionIds?.() ?? []);
-        this.log(`[Codedeck] Snapshot: ${snapshotIds.size} existing sessions`);
+        this.log(`[Codedeck] Snapshot: ${snapshotIds.size} existing sessions: [${[...snapshotIds].map(id => id.slice(0, 8)).join(', ')}]`);
 
         try {
           // Await the terminal open (~200ms) — confirms the command succeeded
@@ -93,13 +94,20 @@ export class BridgeCore {
           this.sessionProvider?.startFastScan?.(1000, 30_000);
 
           // Active snapshot-diff polling — fallback when onNewSession callback doesn't fire
+          let diffPollCount = 0;
           const diffInterval = setInterval(() => {
             if (!this.pendingSessions.has(pendingId)) { return; }
+            diffPollCount++;
+            this.log(`[Codedeck] Pending ${pendingId.slice(0, 8)}: diff-poll #${diffPollCount}, scanning for new files...`);
             this.sessionProvider?.scanForNewFiles?.();
+            const allIds = this.sessionProvider?.getAllSessionIds?.() ?? [];
+            this.log(`[Codedeck] Pending ${pendingId.slice(0, 8)}: ${allIds.length} total sessions known (snapshot had ${snapshotIds.size})`);
             const newSession = this.sessionProvider?.findNewSessionNotIn?.(snapshotIds);
             if (newSession) {
               this.log(`[Codedeck] Snapshot-diff: found new session ${newSession.id} for pending ${pendingId}`);
               this.resolvePendingSession(pendingId, newSession);
+            } else {
+              this.log(`[Codedeck] Pending ${pendingId.slice(0, 8)}: no new session found yet`);
             }
           }, 2000);
 
@@ -116,7 +124,7 @@ export class BridgeCore {
             });
           }, BridgeCore.PENDING_SESSION_TIMEOUT_MS);
 
-          this.pendingSessions.set(pendingId, { pendingId, timeoutHandle, diffInterval, snapshotIds });
+          this.pendingSessions.set(pendingId, { pendingId, timeoutHandle, diffInterval, snapshotIds, createdAt: Date.now() });
 
           // Return immediately — no blocking await
         } catch (err) {
@@ -245,7 +253,8 @@ export class BridgeCore {
     this.pendingSessions.delete(pendingId);
     this.sessionProvider?.stopFastScan?.();
 
-    this.log(`[Codedeck] Session ${session.id} matched pendingId ${pendingId} — publishing session-ready`);
+    const elapsed = pending.createdAt ? ((Date.now() - pending.createdAt) / 1000).toFixed(1) : '?';
+    this.log(`[Codedeck] Session ${session.id} matched pendingId ${pendingId} after ${elapsed}s — publishing session-ready`);
     this.relay.publishSessionReady(pendingId, session).catch(err => {
       this.log(`[Codedeck] Failed to publish session-ready: ${err}`);
     });

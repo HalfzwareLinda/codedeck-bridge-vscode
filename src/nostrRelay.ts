@@ -60,6 +60,17 @@ export class NostrRelay {
   // Pause output flushing while a session list publish is in progress.
   private sessionListPublishing = false;
 
+  // --- Session list publish debounce ---
+  // Coalesce rapid-fire publishSessionList calls (e.g. activation + oneose)
+  private publishDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingPublishSessions: RemoteSessionInfo[] | null = null;
+  private publishDebounceCount = 0;
+
+  // --- Monotonic timestamp for NIP-33 replaceable events ---
+  // Ensures each session list event has a strictly newer created_at than the previous one,
+  // preventing "replaced: have newer event" rejections from relays.
+  private lastSessionListTimestamp = 0;
+
   constructor(
     secretKey: Uint8Array,
     relays: string[],
@@ -138,6 +149,12 @@ export class NostrRelay {
       clearTimeout(this.outputFlushTimer);
       this.outputFlushTimer = null;
     }
+    if (this.publishDebounceTimer) {
+      clearTimeout(this.publishDebounceTimer);
+      this.publishDebounceTimer = null;
+      this.pendingPublishSessions = null;
+      this.publishDebounceCount = 0;
+    }
     this.outputQueue.length = 0;
     if (this.subscription) {
       this.subscription.close();
@@ -174,6 +191,7 @@ export class NostrRelay {
    * Publish session list as a NIP-33 replaceable event.
    * Kind 30515 with d-tag = machine name ensures relays keep only the latest.
    *
+   * Debounced (500ms) to coalesce rapid-fire calls (e.g. activation + oneose).
    * Pauses output publishing while in progress to avoid relay rate-limits.
    * Retries once after 3s if all relays reject the publish.
    */
@@ -183,6 +201,39 @@ export class NostrRelay {
       return;
     }
 
+    // Debounce: store latest sessions and reset timer
+    this.pendingPublishSessions = sessions;
+    this.publishDebounceCount++;
+
+    if (this.publishDebounceTimer) {
+      clearTimeout(this.publishDebounceTimer);
+    }
+
+    return new Promise<void>((resolve) => {
+      this.publishDebounceTimer = setTimeout(async () => {
+        this.publishDebounceTimer = null;
+        const toPublish = this.pendingPublishSessions;
+        const coalescedCalls = this.publishDebounceCount;
+        this.pendingPublishSessions = null;
+        this.publishDebounceCount = 0;
+
+        if (!toPublish || !this.pool) {
+          resolve();
+          return;
+        }
+
+        if (coalescedCalls > 1) {
+          this.log(`[Codedeck] publishSessionList: coalesced ${coalescedCalls} calls into 1`);
+        }
+
+        await this.doPublishSessionListWithRetry(toPublish);
+        resolve();
+      }, 500);
+    });
+  }
+
+  /** Publish with retry logic. */
+  private async doPublishSessionListWithRetry(sessions: RemoteSessionInfo[]): Promise<void> {
     // Pause output flushing so session list gets relay bandwidth priority
     this.sessionListPublishing = true;
 
@@ -202,6 +253,13 @@ export class NostrRelay {
     }
   }
 
+  /** Get a monotonically increasing timestamp for NIP-33 events. */
+  private getNextTimestamp(): number {
+    const now = Math.floor(Date.now() / 1000);
+    this.lastSessionListTimestamp = Math.max(now, this.lastSessionListTimestamp + 1);
+    return this.lastSessionListTimestamp;
+  }
+
   /** Internal: publish session list to all phones. Returns true if ALL relays failed. */
   private async doPublishSessionList(sessions: RemoteSessionInfo[]): Promise<boolean> {
     this.log(`[Codedeck] publishSessionList: ${sessions.length} sessions to ${this.pairedPhones.length} phones via ${this.relays.join(', ')}`);
@@ -214,6 +272,7 @@ export class NostrRelay {
 
     const json = JSON.stringify(msg);
     let anySuccess = false;
+    const timestamp = this.getNextTimestamp();
 
     for (const phone of this.pairedPhones) {
       if (!this.pool) { return !anySuccess; }
@@ -223,7 +282,7 @@ export class NostrRelay {
 
         const event = finalizeEvent({
           kind: SESSION_LIST_EVENT_KIND,
-          created_at: Math.floor(Date.now() / 1000),
+          created_at: timestamp,
           tags: [
             ['p', phone.pubkeyHex],
             ['d', this.machineName], // NIP-33: identifier for replaceable event
@@ -231,7 +290,7 @@ export class NostrRelay {
           content: ciphertext,
         }, this.secretKey);
 
-        this.log(`[Codedeck] Publishing session list event: kind=${event.kind}, content=${ciphertext.length} chars, to ${phone.label} (${phone.pubkeyHex.slice(0, 8)}...)`);
+        this.log(`[Codedeck] Publishing session list event: id=${event.id.slice(0, 8)}, kind=${event.kind}, created_at=${timestamp}, content=${ciphertext.length} chars, to ${phone.label} (${phone.pubkeyHex.slice(0, 8)}...)`);
         const results = this.pool.publish(this.relays, event);
         const outcomes = await Promise.allSettled(results);
         for (let i = 0; i < outcomes.length; i++) {
@@ -239,14 +298,23 @@ export class NostrRelay {
             this.log(`[Codedeck] Relay ${this.relays[i]}: publish OK`);
             anySuccess = true;
           } else {
-            console.error(`[Codedeck] Relay ${this.relays[i]}: publish FAILED`, (outcomes[i] as PromiseRejectedResult).reason);
+            const reason = (outcomes[i] as PromiseRejectedResult).reason;
+            const errMsg = reason instanceof Error ? reason.message : String(reason);
+            if (errMsg.includes('replaced') || errMsg.includes('newer event')) {
+              // Relay already has this event (or a newer version) — treat as success
+              this.log(`[Codedeck] Relay ${this.relays[i]}: publish OK (relay already has event: ${errMsg})`);
+              anySuccess = true;
+            } else {
+              this.log(`[Codedeck] Relay ${this.relays[i]}: publish FAILED: ${errMsg}`);
+            }
           }
         }
       } catch (err) {
-        console.error(`[Codedeck] Failed to publish session list to ${phone.label}:`, err);
+        this.log(`[Codedeck] Failed to publish session list to ${phone.label}: ${err}`);
       }
     }
 
+    this.log(`[Codedeck] publishSessionList result: anySuccess=${anySuccess}`);
     return !anySuccess;
   }
 

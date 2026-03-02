@@ -91,7 +91,7 @@ export function activate(context: vscode.ExtensionContext): void {
         // Publish current session list so phones see us immediately
         if (sessionWatcher) {
           const sessions = sessionWatcher.getSessions();
-          log(`[Codedeck] Relay connected — publishing ${sessions.length} sessions`);
+          log(`[Codedeck] Relay connected (oneose) — requesting publish of ${sessions.length} sessions`);
           for (const s of sessions) {
             log(`[Codedeck]   session: ${s.slug} (${s.id})`);
           }
@@ -116,6 +116,7 @@ export function activate(context: vscode.ExtensionContext): void {
       bridgeCore?.onSessionOutput(sessionId, entries);
     },
     onSessionListChanged: (sessions) => {
+      log(`[Codedeck] SessionWatcher fired onSessionListChanged (${sessions.length} sessions)`);
       bridgeCore?.onSessionListChanged(sessions);
     },
     onNewSession: (sessionId, cwd) => {

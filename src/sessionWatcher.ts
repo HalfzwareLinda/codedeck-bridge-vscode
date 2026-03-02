@@ -638,9 +638,11 @@ export class SessionWatcher implements vscode.Disposable {
    */
   findNewSessionNotIn(excludeIds: Set<string>): RemoteSessionInfo | null {
     let newest: { info: RemoteSessionInfo; mtimeMs: number } | null = null;
+    let candidateCount = 0;
 
     for (const [filePath, meta] of this.sessionMeta) {
       if (excludeIds.has(meta.sessionId)) { continue; }
+      candidateCount++;
       try {
         const stat = fs.statSync(filePath);
         const info: RemoteSessionInfo = {
@@ -660,6 +662,7 @@ export class SessionWatcher implements vscode.Disposable {
       }
     }
 
+    console.log(`[Codedeck] findNewSessionNotIn: ${this.sessionMeta.size} total, ${excludeIds.size} excluded, ${candidateCount} candidates, result=${newest?.info.id.slice(0, 8) ?? 'none'}`);
     return newest?.info ?? null;
   }
 
@@ -678,14 +681,23 @@ export class SessionWatcher implements vscode.Disposable {
    * Auto-stops after `maxDurationMs` (default 30s).
    */
   startFastScan(intervalMs = 1000, maxDurationMs = 30_000): void {
-    if (this.fastScanInterval) { return; } // already running
-    console.log(`[Codedeck] Starting fast scan (every ${intervalMs}ms, up to ${maxDurationMs / 1000}s)`);
-    this.fastScanInterval = setInterval(() => this.scanForNewFiles(), intervalMs);
+    if (this.fastScanInterval) {
+      console.log(`[Codedeck] Fast scan already running, skipping`);
+      return;
+    }
+    console.log(`[Codedeck] Starting fast scan (every ${intervalMs}ms, up to ${maxDurationMs / 1000}s), claudeDir=${this.claudeDir}`);
+    let scanCount = 0;
+    this.fastScanInterval = setInterval(() => {
+      scanCount++;
+      console.log(`[Codedeck] Fast scan #${scanCount}: scanning ${this.claudeDir} (${this.sessionMeta.size} sessions indexed, ${this.fileOffsets.size} files tracked)`);
+      this.scanForNewFiles();
+    }, intervalMs);
     this.fastScanTimeout = setTimeout(() => this.stopFastScan(), maxDurationMs);
   }
 
   stopFastScan(): void {
     if (this.fastScanInterval) {
+      console.log(`[Codedeck] Stopping fast scan`);
       clearInterval(this.fastScanInterval);
       this.fastScanInterval = null;
     }
