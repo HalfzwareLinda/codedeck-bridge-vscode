@@ -143,15 +143,18 @@ export class BridgeCore {
         }
       },
       onPermissionResponse: async (sessionId, _requestId, allow, modifier) => {
-        // Map to Claude Code's permission prompt keys:
-        // y = yes, n = no, a = always allow, d = don't ask again
+        // Claude Code's permission prompt is an Ink SelectInput with numbered options:
+        //   1. Yes
+        //   2. Yes, allow all edits during this session (shift+tab)
+        //   3. No
+        // Pressing the number key instantly selects the option.
         let answer: string;
         if (modifier === 'always') {
-          answer = 'a';
+          answer = '2';
         } else if (modifier === 'never') {
-          answer = 'd';
+          answer = '3';
         } else {
-          answer = allow ? 'y' : 'n';
+          answer = allow ? '1' : '3';
         }
         this.log(`[Codedeck] Permission response for session ${sessionId}: ${answer}`);
         const sent = await this.terminal.sendKeypress(answer, sessionId);
