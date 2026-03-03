@@ -23,6 +23,8 @@ Bridges Claude Code sessions running in VSCode to the [Codedeck](https://github.
 - **Remote session creation**: Start new Claude Code terminals from the phone with direct `claude --session-id` spawning
 - **Session title back-fill**: Extracts first user message for sessions with missing titles
 - History catch-up on reconnect with sequence-based gap detection
+- **Mode switching**: Runtime permission mode cycling (default/plan/acceptEdits/bypassPermissions) via Shift+Tab
+- **Reliability**: Exponential backoff reconnection, TOCTOU-safe file reads, terminal liveness checks, memory-bounded history buffers
 - Relay rate-limit resilience for session-ready events
 - Status bar indicator showing connection state
 
@@ -34,7 +36,7 @@ Bridges Claude Code sessions running in VSCode to the [Codedeck](https://github.
 
 ## Settings
 
-- `codedeck.relays` — Nostr relay URLs (default: `wss://relay.nos.social`, `wss://relay.primal.net`, `wss://nos.lol`)
+- `codedeck.relays` — Nostr relay URLs (default: `wss://relay.primal.net`, `wss://relay.nostr.band`, `wss://nos.lol`)
 - `codedeck.machineName` — Display name for this machine (defaults to hostname)
 
 ## Development
