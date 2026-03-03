@@ -15,6 +15,7 @@ export interface RemoteSessionInfo {
   lineCount: number;
   title: string | null;
   project: string;
+  hasTerminal?: boolean;
 }
 
 export interface SessionListMessage {
@@ -138,9 +139,17 @@ export interface SessionFailedMessage {
   reason: string;       // 'timeout' | 'terminal-failed'
 }
 
+// --- Input delivery feedback (bridge → phone) ---
+
+export interface InputFailedMessage {
+  type: 'input-failed';
+  sessionId: string;
+  reason: 'no-terminal' | 'expired';
+}
+
 // --- Union ---
 
-export type BridgeOutbound = SessionListMessage | OutputMessage | HistoryResponseMessage | SessionPendingMessage | SessionReadyMessage | SessionFailedMessage;
+export type BridgeOutbound = SessionListMessage | OutputMessage | HistoryResponseMessage | SessionPendingMessage | SessionReadyMessage | SessionFailedMessage | InputFailedMessage;
 export type BridgeInbound = InputMessage | PermissionResponseMessage | KeypressMessage | ModeChangeMessage | HistoryRequestMessage | CreateSessionMessage | RefreshSessionsMessage | UploadImageMessage;
 export type BridgeMessage = BridgeOutbound | BridgeInbound;
 

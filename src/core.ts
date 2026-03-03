@@ -22,6 +22,7 @@ export interface BridgeCoreConfig {
   machineName: string;
   pairedPhones: PairedPhone[];
   workspaceCwd?: string;
+  lastSeenTimestamp?: number;
 }
 
 export interface TerminalSender {
@@ -30,6 +31,8 @@ export interface TerminalSender {
   sendKeypress: (key: string, sessionId?: string) => Promise<boolean>;
   /** Spawn a new Claude Code terminal with a specific session ID. Returns immediately. */
   createSession: (sessionId: string, cwd?: string) => void;
+  /** Queue input for a session that was just relaunched (delayed delivery). */
+  queueInputForRelaunch: (sessionId: string, text: string) => void;
   notifyNoTerminal: () => void;
 }
 
@@ -69,11 +72,30 @@ export class BridgeCore {
     this.workspaceCwd = config.workspaceCwd ?? '';
 
     const relayEvents: NostrRelayEvents = {
-      onInput: async (sessionId, text) => {
+      onInput: async (sessionId, text, phonePubkey) => {
         this.log(`[Codedeck] Input for session ${sessionId}: ${text.slice(0, 50)}...`);
         const sent = await this.terminal.sendText(text, sessionId);
         if (!sent) {
+          // Try to auto-relaunch the session's terminal before giving up
+          const sessions = this.sessionProvider?.getSessions() ?? [];
+          const session = sessions.find(s => s.id === sessionId);
+          if (session) {
+            this.log(`[Codedeck] No terminal for ${sessionId} — auto-relaunching in ${session.cwd}`);
+            try {
+              this.terminal.createSession(sessionId, session.cwd);
+              // Queue input for delayed delivery (Claude needs ~5s to start)
+              this.terminal.queueInputForRelaunch(sessionId, text);
+              this.log(`[Codedeck] Input queued for relaunch of ${sessionId}`);
+              return;
+            } catch (err) {
+              this.log(`[Codedeck] Auto-relaunch failed for ${sessionId}: ${err}`);
+            }
+          }
+          // Relaunch failed or no session info — fall back to input-failed
           this.terminal.notifyNoTerminal();
+          this.relay.publishInputFailed(sessionId, 'no-terminal').catch(err => {
+            console.error('[Codedeck] Failed to publish input-failed:', err);
+          });
         }
       },
       onCreateSession: async () => {
@@ -131,6 +153,9 @@ export class BridgeCore {
         const sent = await this.terminal.sendKeypress(answer, sessionId);
         if (!sent) {
           this.log(`[Codedeck] WARNING: Failed to deliver permission ${answer} to terminal for ${sessionId}`);
+          this.relay.publishInputFailed(sessionId, 'no-terminal').catch(err => {
+            console.error('[Codedeck] Failed to publish input-failed:', err);
+          });
         }
       },
       onKeypress: async (sessionId, key) => {
@@ -138,6 +163,9 @@ export class BridgeCore {
         const sent = await this.terminal.sendKeypress(key, sessionId);
         if (!sent) {
           this.log(`[Codedeck] WARNING: Failed to deliver keypress '${key}' to terminal for ${sessionId}`);
+          this.relay.publishInputFailed(sessionId, 'no-terminal').catch(err => {
+            console.error('[Codedeck] Failed to publish input-failed:', err);
+          });
         }
       },
       onModeChange: (sessionId, mode) => {
@@ -189,6 +217,7 @@ export class BridgeCore {
       config.machineName,
       relayEvents,
       log,
+      config.lastSeenTimestamp,
     );
   }
 

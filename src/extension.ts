@@ -24,13 +24,15 @@ import {
   loadSecretKey,
   saveSecretKey,
 } from './pairing';
-import type { PairedPhone } from './types';
+import type { PairedPhone, RemoteSessionInfo } from './types';
 
 let bridgeCore: BridgeCore | undefined;
 let sessionWatcher: SessionWatcher | undefined;
 let statusBar: StatusBar | undefined;
+let extensionContext: vscode.ExtensionContext | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
+  extensionContext = context;
   console.log('[Codedeck] Extension activating...');
 
   // --- Initialize keypair ---
@@ -67,10 +69,22 @@ export function activate(context: vscode.ExtensionContext): void {
   const terminalRegistry = new TerminalRegistry();
   context.subscriptions.push(terminalRegistry);
 
+  // Wire expired input notifications to input-failed feedback
+  terminalRegistry.onInputExpired = (sessionId: string) => {
+    bridgeCore?.relay.publishInputFailed(sessionId, 'expired').catch(err => {
+      console.error('[Codedeck] Failed to publish input-failed (expired):', err);
+    });
+  };
+
+  /** Enrich sessions with terminal availability before publishing. */
+  const enrichWithTerminalStatus = (sessions: RemoteSessionInfo[]) =>
+    sessions.map(s => ({ ...s, hasTerminal: terminalRegistry.hasTerminal(s.id) }));
+
   // --- Core bridge (pure Node.js logic) ---
   const workspaceCwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  const lastSeenTimestamp = context.globalState.get<number>('codedeck_lastSeenTimestamp', 0);
   bridgeCore = new BridgeCore(
-    { secretKey, relays, machineName, pairedPhones, workspaceCwd },
+    { secretKey, relays, machineName, pairedPhones, workspaceCwd, lastSeenTimestamp },
     {
       sendText: (text, sessionId?) => terminalRegistry.sendText(text, sessionId),
       sendKeypress: (key, sessionId?) => terminalRegistry.sendKeypress(key, sessionId),
@@ -79,6 +93,7 @@ export function activate(context: vscode.ExtensionContext): void {
         terminalRegistry.createSession(sessionId, cwd);
         log(`[Codedeck] Claude Code terminal spawned for ${sessionId}`);
       },
+      queueInputForRelaunch: (sessionId, text) => terminalRegistry.queueInputForRelaunch(sessionId, text),
       notifyNoTerminal,
     },
     log,
@@ -96,7 +111,7 @@ export function activate(context: vscode.ExtensionContext): void {
           for (const s of sessions) {
             log(`[Codedeck]   session: ${s.slug} (${s.id})`);
           }
-          bridgeCore?.onSessionListChanged(sessions);
+          bridgeCore?.onSessionListChanged(enrichWithTerminalStatus(sessions));
         } else {
           log('[Codedeck] Relay connected but sessionWatcher not ready');
         }
@@ -117,7 +132,7 @@ export function activate(context: vscode.ExtensionContext): void {
     },
     onSessionListChanged: (sessions) => {
       log(`[Codedeck] SessionWatcher fired onSessionListChanged (${sessions.length} sessions)`);
-      bridgeCore?.onSessionListChanged(sessions);
+      bridgeCore?.onSessionListChanged(enrichWithTerminalStatus(sessions));
     },
     onNewSession: (sessionId, cwd) => {
       terminalRegistry.onNewSession(sessionId, cwd);
@@ -205,7 +220,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
           // Send current session list to the new phone
           if (sessionWatcher) {
-            bridgeCore?.onSessionListChanged(sessionWatcher.getSessions());
+            bridgeCore?.onSessionListChanged(enrichWithTerminalStatus(sessionWatcher.getSessions()));
           }
         },
       );
@@ -255,12 +270,27 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
   );
 
+  // --- Persist last-seen timestamp periodically (crash recovery) ---
+  const timestampInterval = setInterval(() => {
+    const ts = bridgeCore?.relay.lastSeenTimestamp;
+    if (ts && ts > 0) {
+      context.globalState.update('codedeck_lastSeenTimestamp', ts);
+    }
+  }, 30_000);
+  context.subscriptions.push({ dispose: () => clearInterval(timestampInterval) });
+
   console.log(`[Codedeck] Extension activated. Machine: ${machineName}, Relays: ${relays.join(', ')}, Phones: ${pairedPhones.length}`);
 }
 
 export function deactivate(): void {
   console.log('[Codedeck] Extension deactivating...');
+  // Persist last-seen timestamp before shutdown (fire-and-forget)
+  const ts = bridgeCore?.relay.lastSeenTimestamp;
+  if (ts && ts > 0 && extensionContext) {
+    extensionContext.globalState.update('codedeck_lastSeenTimestamp', ts);
+  }
   bridgeCore?.disconnect();
   sessionWatcher?.dispose();
   statusBar?.dispose();
+  extensionContext = undefined;
 }

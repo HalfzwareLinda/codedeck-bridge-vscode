@@ -25,11 +25,12 @@ import type {
   SessionPendingMessage,
   SessionReadyMessage,
   SessionFailedMessage,
+  InputFailedMessage,
 } from './types';
 import { SESSION_LIST_EVENT_KIND, OUTPUT_EVENT_KIND } from './types';
 
 export interface NostrRelayEvents {
-  onInput: (sessionId: string, text: string) => void;
+  onInput: (sessionId: string, text: string, phonePubkey: string) => void;
   onPermissionResponse: (sessionId: string, requestId: string, allow: boolean, modifier?: 'always' | 'never') => void;
   onKeypress: (sessionId: string, key: string) => void;
   onModeChange: (sessionId: string, mode: 'plan' | 'auto') => void;
@@ -51,6 +52,11 @@ export class NostrRelay {
   private onConnectionChange?: (status: 'connected' | 'disconnected' | 'error', message?: string) => void;
   private reconnecting = false;
   private log: (msg: string) => void;
+
+  // --- Persistent last-seen timestamp ---
+  // Tracks the most recent event we processed. Used as `since` on reconnect
+  // to bridge the gap after a crash instead of using an arbitrary window.
+  private _lastSeenTimestamp: number;
 
   // --- Output throttling ---
   // Queue output entries and flush at most once per interval to avoid relay rate-limits.
@@ -82,6 +88,7 @@ export class NostrRelay {
     machineName: string,
     events: NostrRelayEvents,
     log?: (msg: string) => void,
+    lastSeenTimestamp?: number,
   ) {
     this.secretKey = secretKey;
     this.pubkeyHex = getPublicKey(secretKey);
@@ -90,6 +97,12 @@ export class NostrRelay {
     this.events = events;
     this.machineName = machineName;
     this.log = log ?? console.log;
+    this._lastSeenTimestamp = lastSeenTimestamp ?? 0;
+  }
+
+  /** Get the timestamp of the last processed event (for persistence). */
+  get lastSeenTimestamp(): number {
+    return this._lastSeenTimestamp;
   }
 
   get npub(): string {
@@ -123,13 +136,15 @@ export class NostrRelay {
       this.subscription = this.pool.subscribeMany(
         this.relays,
         // Listen for both output-kind and session-list-kind events from phones.
-        // `since` prevents replaying historical create-session/input events on reconnect.
-        // Session list (kind 30515) is not affected — the bridge publishes its own on connect.
+        // `since` uses persisted last-seen timestamp to bridge crash gaps,
+        // falling back to 5-minute window if no timestamp was persisted.
         {
           kinds: [OUTPUT_EVENT_KIND, SESSION_LIST_EVENT_KIND],
           '#p': [this.pubkeyHex],
           authors: phonePubkeys,
-          since: Math.floor(Date.now() / 1000) - 5, // only events from now (5s grace)
+          since: this._lastSeenTimestamp > 0
+            ? this._lastSeenTimestamp - 5  // 5s grace before last-seen
+            : Math.floor(Date.now() / 1000) - 300,  // fallback: 5-minute window
         },
         {
           onevent: (event) => {
@@ -520,6 +535,17 @@ export class NostrRelay {
     return this.publishToAllPhones(msg, 60);
   }
 
+  /** Publish input-failed feedback when input can't be routed to a terminal (NIP-40: expires in 60s). */
+  async publishInputFailed(sessionId: string, reason: 'no-terminal' | 'expired'): Promise<boolean> {
+    const msg: InputFailedMessage = {
+      type: 'input-failed',
+      sessionId,
+      reason,
+    };
+    this.log(`[Codedeck] Publishing input-failed: session=${sessionId}, reason=${reason}`);
+    return this.publishToAllPhones(msg, 60);
+  }
+
   private static readonly HISTORY_CHUNK_SIZE = 20;
   private static readonly MAX_CHUNK_JSON_BYTES = 48_000;
   private static readonly CHUNK_DELAY_MS = 500;
@@ -639,7 +665,7 @@ export class NostrRelay {
   private handleIncomingEvent(event: { pubkey: string; content: string; created_at: number }): void {
     // Safety net: ignore events older than 60s (in case relays don't enforce `since`)
     const now = Math.floor(Date.now() / 1000);
-    if (event.created_at < now - 60) {
+    if (event.created_at < now - 300) {
       this.log(`[Codedeck] Ignoring stale event (${now - event.created_at}s old)`);
       return;
     }
@@ -657,11 +683,16 @@ export class NostrRelay {
       const plaintext = decrypt(event.content, conversationKey);
       const msg: BridgeInbound = JSON.parse(plaintext);
 
+      // Track last-seen event timestamp for crash-recovery since filter
+      if (event.created_at > this._lastSeenTimestamp) {
+        this._lastSeenTimestamp = event.created_at;
+      }
+
       this.log(`[Codedeck] Received ${msg.type} from ${phone.label} for session ${'sessionId' in msg ? msg.sessionId : 'N/A'}`);
 
       switch (msg.type) {
         case 'input':
-          Promise.resolve(this.events.onInput(msg.sessionId, msg.text))
+          Promise.resolve(this.events.onInput(msg.sessionId, msg.text, event.pubkey))
             .catch(err => console.error('[Codedeck] onInput handler error:', err));
           break;
         case 'permission-res':

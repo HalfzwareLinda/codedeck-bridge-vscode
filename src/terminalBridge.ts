@@ -57,6 +57,8 @@ export class TerminalRegistry implements vscode.Disposable {
   private static readonly PENDING_INPUT_TIMEOUT_MS = 30_000;
   /** Shell integration listeners pending for terminals that haven't launched claude yet. */
   private launchDisposables: Map<vscode.Terminal, vscode.Disposable[]> = new Map();
+  /** Callback fired when queued input expires without being delivered. */
+  onInputExpired?: (sessionId: string) => void;
 
   constructor() {
     this.disposables.push(
@@ -156,6 +158,27 @@ export class TerminalRegistry implements vscode.Disposable {
   }
 
   /**
+   * Queue input for a session that was just relaunched. The terminal exists
+   * but Claude hasn't started yet, so we can't send immediately.
+   * Flushes after a delay to give Claude time to start up.
+   */
+  queueInputForRelaunch(sessionId: string, text: string, delayMs = 5_000): void {
+    this.pendingInputs.push({ text, sessionId, timestamp: Date.now() });
+    const terminal = this.sessionTerminals.get(sessionId);
+    if (terminal && terminal.exitStatus === undefined) {
+      setTimeout(() => {
+        this.flushPendingInputs(sessionId, terminal);
+      }, delayMs);
+    }
+  }
+
+  /** Check if a session has a live (non-exited) terminal mapping. */
+  hasTerminal(sessionId: string): boolean {
+    const terminal = this.sessionTerminals.get(sessionId);
+    return terminal !== undefined && terminal.exitStatus === undefined;
+  }
+
+  /**
    * Send a single raw keypress to a Claude Code terminal without the
    * Escape+Enter workaround. Used for permission prompts where Claude Code
    * reads single keypresses in raw mode (y/n/a/d).
@@ -172,6 +195,19 @@ export class TerminalRegistry implements vscode.Disposable {
         this.sessionTerminals.delete(sessionId);
       }
     }
+
+    // Fallback: try any live Claude terminal (best effort for manually opened sessions)
+    const claudeTerminals = findClaudeTerminals().filter(t => t.exitStatus === undefined);
+    if (claudeTerminals.length === 1) {
+      console.log(`[Codedeck] sendKeypress fallback: single Claude terminal for session ${sessionId}: ${key}`);
+      claudeTerminals[0].sendText(key, false);
+      // Establish mapping for future calls
+      if (sessionId) {
+        this.sessionTerminals.set(sessionId, claudeTerminals[0]);
+      }
+      return true;
+    }
+
     return false;
   }
 
@@ -338,9 +374,10 @@ export class TerminalRegistry implements vscode.Disposable {
       } else if ((now - pending.timestamp) < TerminalRegistry.PENDING_INPUT_TIMEOUT_MS) {
         remaining.push(pending);
       }
-      // else: expired, drop
+      // else: expired, drop and notify
       else {
         console.log(`[Codedeck] Pending input EXPIRED for session ${pending.sessionId}: ${pending.text.slice(0, 50)}...`);
+        this.onInputExpired?.(pending.sessionId);
       }
     }
 
@@ -353,11 +390,17 @@ export class TerminalRegistry implements vscode.Disposable {
   }
 
   /**
-   * Remove expired pending inputs.
+   * Remove expired pending inputs, notifying via onInputExpired callback.
    */
   private prunePendingInputs(): void {
     const cutoff = Date.now() - TerminalRegistry.PENDING_INPUT_TIMEOUT_MS;
+    const expired = this.pendingInputs.filter(p => p.timestamp <= cutoff);
     this.pendingInputs = this.pendingInputs.filter(p => p.timestamp > cutoff);
+
+    for (const p of expired) {
+      console.log(`[Codedeck] Pending input EXPIRED for session ${p.sessionId}: ${p.text.slice(0, 50)}...`);
+      this.onInputExpired?.(p.sessionId);
+    }
   }
 
   private isClaudeTerminal(terminal: vscode.Terminal): boolean {
