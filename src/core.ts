@@ -133,6 +133,13 @@ export class BridgeCore {
           this.log(`[Codedeck] WARNING: Failed to deliver permission ${answer} to terminal for ${sessionId}`);
         }
       },
+      onKeypress: async (sessionId, key) => {
+        this.log(`[Codedeck] Keypress for session ${sessionId}: ${key}`);
+        const sent = await this.terminal.sendKeypress(key, sessionId);
+        if (!sent) {
+          this.log(`[Codedeck] WARNING: Failed to deliver keypress '${key}' to terminal for ${sessionId}`);
+        }
+      },
       onModeChange: (sessionId, mode) => {
         this.log(`[Codedeck] Mode change for session ${sessionId}: ${mode}`);
         if (mode === 'plan') {
@@ -243,6 +250,10 @@ export class BridgeCore {
       this.imageChunks.set(uploadId, tracker);
     }
 
+    if (chunkIndex < 0 || chunkIndex >= totalChunks) {
+      this.log(`[Codedeck] Image chunk ${chunkIndex} out of range [0, ${totalChunks}) for upload ${uploadId} — skipping`);
+      return;
+    }
     tracker.received.set(chunkIndex, base64Data);
     if (chunkIndex === 0 && text) {
       tracker.text = text;

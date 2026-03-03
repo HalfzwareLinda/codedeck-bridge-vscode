@@ -322,6 +322,8 @@ export function extractFirstUserMessage(lines: string[]): string | null {
         if (block.type === 'text' && block.text && !block.text.startsWith('<ide_')) {
           const text = block.text.replace(/\n/g, ' ').trim();
           if (!text) continue;
+          // Skip system-like messages that aren't real user prompts
+          if (text.startsWith('[') || text.startsWith('Request interrupted')) continue;
           return text.length > 80 ? text.slice(0, 77) + '...' : text;
         }
       }

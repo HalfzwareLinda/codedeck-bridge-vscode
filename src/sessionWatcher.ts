@@ -380,18 +380,29 @@ export class SessionWatcher implements vscode.Disposable {
         batchEntries.push(...entries);
       }
 
-      // Collect tool_use_ids that already have a tool_result in this batch
-      const resolvedInBatch = new Set<string>();
+      // Collect tool_use_ids that already have a tool_result — both in this batch
+      // AND in the existing session history (prevents brief permission card flash
+      // when tool_use and tool_result arrive in separate batches)
+      const resolvedIds = new Set<string>();
       for (const entry of batchEntries) {
         if (entry.entryType === 'tool_result') {
           const id = entry.metadata?.tool_use_id as string | undefined;
-          if (id) { resolvedInBatch.add(id); }
+          if (id) { resolvedIds.add(id); }
+        }
+      }
+      const history = this.sessionHistory.get(meta.sessionId);
+      if (history) {
+        for (const { entry } of history) {
+          if (entry.entryType === 'tool_result') {
+            const id = entry.metadata?.tool_use_id as string | undefined;
+            if (id) { resolvedIds.add(id); }
+          }
         }
       }
 
       // Pass 2: inject permission_request entries, skipping already-resolved tools
       const currentMode = this.permissionModes.get(meta.sessionId) ?? 'default';
-      const withPermissions = this.injectPermissionRequests(batchEntries, currentMode, resolvedInBatch);
+      const withPermissions = this.injectPermissionRequests(batchEntries, currentMode, resolvedIds);
 
       const seqEntries: Array<{ seq: number; entry: OutputEntry }> = [];
       for (const entry of withPermissions) {
@@ -428,8 +439,8 @@ export class SessionWatcher implements vscode.Disposable {
           }
         }
       }
-    } catch {
-      // File may have been deleted between stat and read
+    } catch (err) {
+      console.warn(`[Codedeck] readNewLines failed for ${path.basename(filePath)}:`, err);
     }
   }
 
