@@ -57,6 +57,10 @@ export class TerminalRegistry implements vscode.Disposable {
   private static readonly PENDING_INPUT_TIMEOUT_MS = 30_000;
   /** Shell integration listeners pending for terminals that haven't launched claude yet. */
   private launchDisposables: Map<vscode.Terminal, vscode.Disposable[]> = new Map();
+  /** Tracked timeout handles for pending input flushes (cleared on dispose). */
+  private pendingTimers: Set<ReturnType<typeof setTimeout>> = new Set();
+  /** Guard against concurrent flushPendingInputs calls for the same session. */
+  private flushingSession: Set<string> = new Set();
   /** Callback fired when queued input expires without being delivered. */
   onInputExpired?: (sessionId: string) => void;
 
@@ -162,9 +166,11 @@ export class TerminalRegistry implements vscode.Disposable {
     this.pendingInputs.push({ text, sessionId, timestamp: Date.now() });
     const terminal = this.sessionTerminals.get(sessionId);
     if (terminal && terminal.exitStatus === undefined) {
-      setTimeout(() => {
+      const timer = setTimeout(() => {
+        this.pendingTimers.delete(timer);
         this.flushPendingInputs(sessionId, terminal);
       }, delayMs);
+      this.pendingTimers.add(timer);
     }
   }
 
@@ -341,18 +347,21 @@ export class TerminalRegistry implements vscode.Disposable {
    */
   private async submitToTerminal(terminal: vscode.Terminal, text: string): Promise<void> {
     // Type the text without submitting
+    if (terminal.exitStatus !== undefined) { return; }
     terminal.sendText(text, false);
 
     // Wait for autocomplete to engage
     await new Promise(r => setTimeout(r, 300));
 
     // Escape to dismiss autocomplete
+    if (terminal.exitStatus !== undefined) { return; }
     terminal.sendText('\x1b', false);
 
     // Small delay before Enter
     await new Promise(r => setTimeout(r, 100));
 
     // Enter to submit
+    if (terminal.exitStatus !== undefined) { return; }
     terminal.sendText('\r', false);
   }
 
@@ -370,6 +379,10 @@ export class TerminalRegistry implements vscode.Disposable {
    * Sends each input sequentially since submitToTerminal uses timed delays.
    */
   private async flushPendingInputs(sessionId: string, terminal: vscode.Terminal): Promise<void> {
+    // Guard against concurrent flushes for the same session
+    if (this.flushingSession.has(sessionId)) { return; }
+    this.flushingSession.add(sessionId);
+    try {
     const now = Date.now();
     const toSend: PendingInput[] = [];
     const remaining: PendingInput[] = [];
@@ -392,6 +405,9 @@ export class TerminalRegistry implements vscode.Disposable {
     for (const { text } of toSend) {
       console.log(`[Codedeck] Flushing pending input to session ${sessionId}: ${text.slice(0, 50)}...`);
       await this.submitToTerminal(terminal, text);
+    }
+    } finally {
+      this.flushingSession.delete(sessionId);
     }
   }
 
@@ -420,5 +436,7 @@ export class TerminalRegistry implements vscode.Disposable {
       for (const d of disposables) { d.dispose(); }
     }
     this.launchDisposables.clear();
+    for (const timer of this.pendingTimers) { clearTimeout(timer); }
+    this.pendingTimers.clear();
   }
 }

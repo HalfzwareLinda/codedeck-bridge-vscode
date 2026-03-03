@@ -6,6 +6,18 @@
 
 - [x] **Snapshot-diff session detection (v3)** — The event-driven approach still failed because `onNewSession` callback never fired when `FileSystemWatcher` missed the new file or `indexSession` failed on an empty file. Fix: `onCreateSession` now snapshots all known session IDs, starts a 2s diff-polling interval that calls `scanForNewFiles()` + `findNewSessionNotIn(snapshot)`, and resolves via `resolvePendingSession()`. Three independent detection paths now race: (1) `onNewSession` callback via FileSystemWatcher, (2) `onNewSession` via `scanForNewFiles` fast scan, (3) snapshot-diff polling. Also added half-indexed file recovery in `scanForNewFiles` and diagnostic logging throughout.
 
+## Fixed — Reliability Audit (2026-03-03)
+
+- [x] **Relay reconnection with exponential backoff** — `scheduleReconnect()` (2s→30s cap) in `nostrRelay.ts`. Called from `connect()` catch and `onclose`. Reset on `oneose` and successful publish.
+- [x] **Output queue cap** — `MAX_OUTPUT_QUEUE_SIZE` raised from 200 to 500 (matches history buffer).
+- [x] **TOCTOU in readNewLines** — `openSync()` first, `fstatSync(fd)` second. ENOENT cleans up stale offsets.
+- [x] **Terminal liveness checks** — `exitStatus !== undefined` guard before each `sendText()` in `submitToTerminal()`.
+- [x] **Pending timer cleanup** — `pendingTimers` Set tracked in `TerminalRegistry`, cleared in `dispose()`.
+- [x] **Concurrent flush guard** — `flushingSession` Set prevents double-sends in `flushPendingInputs()`.
+- [x] **LRU history eviction** — standalone 5-min interval evicts idle sessions when total exceeds 10K entries.
+- [x] **Dead session pruning** — `pruneDeletedSessions()` checks `fs.existsSync` every ~36s.
+- [x] **Dispose lifecycle** — `dispose()` sets `disposed = true` then `disconnect()` — prevents post-deactivation reconnects.
+
 ## Low Priority — Relay Hygiene (NIP-40 Expiration)
 
 - [ ] **Add 1-hour expiration to history response events** — `nostrRelay.ts:publishHistory()` — Add `['expiration', ...]` tag to kind 29515 history events (`['t', 'history']`). These are one-shot catch-up payloads, pure waste after delivery. Easiest win.

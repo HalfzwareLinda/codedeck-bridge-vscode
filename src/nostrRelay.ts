@@ -51,6 +51,11 @@ export class NostrRelay {
   private machineName: string;
   private onConnectionChange?: (status: 'connected' | 'disconnected' | 'error', message?: string) => void;
   private reconnecting = false;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectAttempt = 0;
+  private static readonly RECONNECT_BASE_MS = 2_000;
+  private static readonly RECONNECT_MAX_MS = 30_000;
+  private disposed = false;
   private log: (msg: string) => void;
 
   // --- Persistent last-seen timestamp ---
@@ -151,23 +156,48 @@ export class NostrRelay {
             this.handleIncomingEvent(event);
           },
           oneose: () => {
+            this.reconnectAttempt = 0; // reset on success
             this.log('[Codedeck] Connected to relays, subscription active');
             this.onConnectionChange?.('connected');
           },
           onclose: (reasons) => {
             this.log(`[Codedeck] Relay subscription closed: ${JSON.stringify(reasons)}`);
             this.onConnectionChange?.('disconnected', 'Relay connection lost — reconnecting');
+            this.scheduleReconnect();
           },
         },
       );
     } catch (err) {
       console.error('[Codedeck] Failed to connect to relays:', err);
       this.onConnectionChange?.('error', String(err));
+      this.scheduleReconnect();
     }
+  }
+
+  /** Schedule a reconnection attempt with exponential backoff (2s→30s cap). */
+  private scheduleReconnect(): void {
+    if (this.disposed || this.reconnectTimer) { return; }
+    if (this.pairedPhones.length === 0) { return; }
+    const delay = Math.min(
+      NostrRelay.RECONNECT_BASE_MS * Math.pow(2, this.reconnectAttempt),
+      NostrRelay.RECONNECT_MAX_MS,
+    );
+    this.reconnectAttempt++;
+    this.log(`[Codedeck] Scheduling reconnect attempt ${this.reconnectAttempt} in ${delay}ms`);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (!this.disposed) {
+        this.connect();
+      }
+    }, delay);
   }
 
   disconnect(): void {
     const wasConnected = this.isConnected();
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     if (this.outputFlushTimer) {
       clearTimeout(this.outputFlushTimer);
       this.outputFlushTimer = null;
@@ -190,6 +220,12 @@ export class NostrRelay {
     if (wasConnected && !this.reconnecting) {
       this.onConnectionChange?.('disconnected');
     }
+  }
+
+  /** Permanently shut down — prevents reconnection attempts after extension deactivation. */
+  dispose(): void {
+    this.disposed = true;
+    this.disconnect();
   }
 
   isConnected(): boolean {
@@ -337,6 +373,7 @@ export class NostrRelay {
       }
     }
 
+    if (anySuccess) { this.reconnectAttempt = 0; }
     this.log(`[Codedeck] publishSessionList result: anySuccess=${anySuccess}`);
     return !anySuccess;
   }
@@ -347,7 +384,7 @@ export class NostrRelay {
    * to avoid relay rate-limits. Each entry becomes a separate Nostr event
    * (preserving per-entry seq numbering) but they're sent in a timed batch.
    */
-  private static readonly MAX_OUTPUT_QUEUE_SIZE = 200;
+  private static readonly MAX_OUTPUT_QUEUE_SIZE = 500;
 
   async publishOutput(sessionId: string, entries: Array<{ seq: number; entry: OutputEntry }>): Promise<void> {
     if (!this.pool || this.pairedPhones.length === 0) { return; }
@@ -515,7 +552,7 @@ export class NostrRelay {
           }
         }
 
-        if (anySuccess) { return true; }
+        if (anySuccess) { this.reconnectAttempt = 0; return true; }
 
         if (attempt < retries) {
           const delay = 2_000 * Math.pow(2, attempt); // 2s, 4s

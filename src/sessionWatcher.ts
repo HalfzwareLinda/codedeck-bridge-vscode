@@ -16,6 +16,9 @@ import { parseJsonlLine, extractSessionMeta, extractFirstUserMessage, resolvePro
 import type { OutputEntry, RemoteSessionInfo } from './types';
 
 const MAX_HISTORY_PER_SESSION = 500;
+const MAX_TOTAL_HISTORY_ENTRIES = 10_000;
+/** Sessions with no output in this window are candidates for history eviction. */
+const HISTORY_EVICT_IDLE_MS = 30 * 60 * 1000; // 30 minutes
 
 export interface SessionWatcherEvents {
   onOutput: (sessionId: string, entries: Array<{ seq: number; entry: OutputEntry }>) => void;
@@ -33,10 +36,14 @@ export class SessionWatcher implements vscode.Disposable {
   private permissionModes: Map<string, string> = new Map();
   /** Incrementally maintained set of tool_use_ids that have a tool_result per session. */
   private resolvedToolIds: Map<string, Set<string>> = new Map();
+  /** Last time output was emitted per session — for LRU history eviction. */
+  private lastOutputTime: Map<string, number> = new Map();
   private events: SessionWatcherEvents;
   private claudeDir: string;
   private workspaceCwd: string | undefined;
   private pollInterval: NodeJS.Timeout | null = null;
+  /** Standalone interval for LRU history eviction (independent of poll cadence). */
+  private evictInterval: NodeJS.Timeout | null = null;
   /** Guard against concurrent readNewLines for the same file. */
   private readingFiles = new Set<string>();
   private emitDebounceTimer: NodeJS.Timeout | null = null;
@@ -69,6 +76,9 @@ export class SessionWatcher implements vscode.Disposable {
     // Also poll every 2 seconds for changes that FileSystemWatcher might miss
     // (some systems don't reliably fire events for appended content)
     this.pollInterval = setInterval(() => this.pollActiveFiles(), 2000);
+
+    // Standalone LRU history eviction — runs every 5 minutes, independent of polling
+    this.evictInterval = setInterval(() => this.evictIdleHistory(), 5 * 60 * 1000);
 
     console.log(`[Codedeck] Watching ${this.claudeDir} for session changes`);
   }
@@ -326,24 +336,37 @@ export class SessionWatcher implements vscode.Disposable {
     if (this.readingFiles.has(filePath)) { return; }
     this.readingFiles.add(filePath);
     try {
-      const stat = fs.statSync(filePath);
-      const offset = this.fileOffsets.get(filePath) ?? 0;
-
-      if (stat.size <= offset) { return; }
-
-      // Read only the new bytes
-      const fd = fs.openSync(filePath, 'r');
-      const newSize = stat.size - offset;
-      const buf = Buffer.alloc(newSize);
+      // Open first, then fstat — avoids TOCTOU race where file is deleted between stat and open
+      let fd: number;
       try {
+        fd = fs.openSync(filePath, 'r');
+      } catch (err: unknown) {
+        // File deleted — clean up stale offset entry
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+          this.onFileDeleted(filePath);
+        }
+        return;
+      }
+
+      let chunk: string;
+      try {
+        const stat = fs.fstatSync(fd);
+        const offset = this.fileOffsets.get(filePath) ?? 0;
+
+        if (stat.size <= offset) { return; }
+
+        // Read only the new bytes
+        const newSize = stat.size - offset;
+        const buf = Buffer.alloc(newSize);
         fs.readSync(fd, buf, 0, newSize, offset);
+
+        this.fileOffsets.set(filePath, stat.size);
+        chunk = buf.toString('utf8');
       } finally {
         fs.closeSync(fd);
       }
 
-      this.fileOffsets.set(filePath, stat.size);
-
-      const chunk = buf.toString('utf8');
+      if (!chunk) { return; }
       const lines = chunk.split('\n');
 
       // If we don't have meta for this file yet, try to extract it
@@ -465,6 +488,7 @@ export class SessionWatcher implements vscode.Disposable {
       }
 
       if (seqEntries.length > 0) {
+        this.lastOutputTime.set(meta.sessionId, Date.now());
         this.events.onOutput(meta.sessionId, seqEntries);
       }
 
@@ -553,10 +577,52 @@ export class SessionWatcher implements vscode.Disposable {
     return result;
   }
 
+  /** Evict history from idle sessions when total entries exceed global cap. */
+  private evictIdleHistory(): void {
+    let total = 0;
+    for (const entries of this.sessionHistory.values()) { total += entries.length; }
+    if (total <= MAX_TOTAL_HISTORY_ENTRIES) { return; }
+
+    const now = Date.now();
+    // Collect sessions sorted by last output time (oldest first)
+    const candidates: Array<{ sessionId: string; lastOutput: number; count: number }> = [];
+    for (const [sessionId, entries] of this.sessionHistory) {
+      const lastOutput = this.lastOutputTime.get(sessionId) ?? 0;
+      if (now - lastOutput > HISTORY_EVICT_IDLE_MS) {
+        candidates.push({ sessionId, lastOutput, count: entries.length });
+      }
+    }
+    candidates.sort((a, b) => a.lastOutput - b.lastOutput);
+
+    for (const { sessionId } of candidates) {
+      if (total <= MAX_TOTAL_HISTORY_ENTRIES) { break; }
+      const entries = this.sessionHistory.get(sessionId);
+      if (entries) {
+        total -= entries.length;
+        this.sessionHistory.delete(sessionId);
+        console.log(`[Codedeck] Evicted history for idle session ${sessionId} (${entries.length} entries)`);
+      }
+    }
+  }
+
+  /** Remove sessionMeta entries for files that no longer exist on disk (Fix #13). */
+  private pruneDeletedSessions(): void {
+    for (const filePath of [...this.sessionMeta.keys()]) {
+      if (!fs.existsSync(filePath)) {
+        console.log(`[Codedeck] Pruning deleted session file: ${path.basename(filePath)}`);
+        this.onFileDeleted(filePath);
+      }
+    }
+  }
+
   private pollActiveFiles(): void {
     this.pollCount++;
     if (this.pollCount % SessionWatcher.NEW_FILE_SCAN_EVERY_N_POLLS === 0) {
       this.scanForNewFiles();
+      // Prune deleted sessions every 6th scan (~36s)
+      if (this.pollCount % (SessionWatcher.NEW_FILE_SCAN_EVERY_N_POLLS * 6) === 0) {
+        this.pruneDeletedSessions();
+      }
     }
 
     for (const filePath of [...this.fileOffsets.keys()]) {
@@ -806,6 +872,10 @@ export class SessionWatcher implements vscode.Disposable {
     if (this.pollInterval) {
       clearInterval(this.pollInterval);
       this.pollInterval = null;
+    }
+    if (this.evictInterval) {
+      clearInterval(this.evictInterval);
+      this.evictInterval = null;
     }
     if (this.emitDebounceTimer) {
       clearTimeout(this.emitDebounceTimer);

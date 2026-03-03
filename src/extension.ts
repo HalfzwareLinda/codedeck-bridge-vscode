@@ -150,81 +150,144 @@ export function activate(context: vscode.ExtensionContext): void {
   bridgeCore.setSessionProvider(sessionWatcher);
 
   if (pairedPhones.length > 0) {
+    statusBar.setConnecting();
     bridgeCore.connect();
-    statusBar.setReady(pairedPhones.length);
   } else {
     statusBar.setReady(0);
   }
 
+  // --- Helper: open pairing panel ---
+  const openPairingPanel = () => {
+    if (!bridgeCore) { return; }
+
+    showPairingPanel(
+      context,
+      {
+        npub: bridgeCore.relay.npub,
+        relays,
+        machine: machineName,
+      },
+      async (pubkeyInput: string, label: string) => {
+        // Decode npub if needed
+        let pubkeyHex: string;
+        if (pubkeyInput.startsWith('npub1')) {
+          try {
+            const decoded = nip19.decode(pubkeyInput);
+            if (decoded.type !== 'npub') {
+              vscode.window.showErrorMessage('Invalid format. Enter an npub (npub1...) or 64-character hex key.');
+              return;
+            }
+            pubkeyHex = decoded.data as string;
+          } catch {
+            vscode.window.showErrorMessage('Invalid format. Enter an npub (npub1...) or 64-character hex key.');
+            return;
+          }
+        } else {
+          pubkeyHex = pubkeyInput;
+        }
+
+        // Add to paired phones
+        const phone: PairedPhone = {
+          npub: nip19.npubEncode(pubkeyHex),
+          pubkeyHex,
+          label,
+          pairedAt: new Date().toISOString(),
+        };
+
+        const phones = loadPairedPhones(context);
+        // Don't add duplicate
+        if (phones.some(p => p.pubkeyHex === pubkeyHex)) {
+          vscode.window.showInformationMessage(`Phone "${label}" is already paired`);
+          return;
+        }
+
+        phones.push(phone);
+        try {
+          await savePairedPhones(context, phones);
+        } catch (err) {
+          console.error('[Codedeck] Failed to save paired phones:', err);
+          vscode.window.showErrorMessage('Codedeck: Failed to save phone pairing');
+          return;
+        }
+
+        // Reconnect relay with new phone
+        bridgeCore?.relay.updatePairedPhones(phones);
+        if (!bridgeCore?.relay.isConnected()) {
+          statusBar?.setConnecting();
+          bridgeCore?.connect();
+        }
+        statusBar?.setReady(phones.length);
+
+        // Send current session list to the new phone
+        if (sessionWatcher) {
+          bridgeCore?.onSessionListChanged(enrichWithTerminalStatus(sessionWatcher.getSessions()));
+        }
+      },
+    );
+  };
+
   // --- Register commands ---
+
+  // Quick menu — shown when clicking the status bar
+  context.subscriptions.push(
+    vscode.commands.registerCommand('codedeck.quickMenu', async () => {
+      const phones = loadPairedPhones(context);
+      const connected = bridgeCore?.relay.isConnected() ?? false;
+      const sessions = sessionWatcher?.getSessions() ?? [];
+
+      const items: vscode.QuickPickItem[] = [];
+
+      // Status summary line
+      items.push({
+        label: `$(info) ${machineName}`,
+        description: connected
+          ? `${phones.length} phone${phones.length !== 1 ? 's' : ''} · ${sessions.length} session${sessions.length !== 1 ? 's' : ''}`
+          : 'Not connected',
+        kind: vscode.QuickPickItemKind.Default,
+      });
+
+      items.push({ label: '', kind: vscode.QuickPickItemKind.Separator });
+
+      items.push({
+        label: '$(add) Pair new phone',
+        description: 'Show QR code for phone pairing',
+      });
+
+      items.push({
+        label: '$(output) Show logs',
+        description: 'Open the Codedeck Bridge output channel',
+      });
+
+      if (phones.length > 0) {
+        items.push({
+          label: '$(close-all) Disconnect all phones',
+          description: `Unpair ${phones.length} phone${phones.length !== 1 ? 's' : ''}`,
+        });
+      }
+
+      const pick = await vscode.window.showQuickPick(items, {
+        placeHolder: 'Codedeck Bridge',
+      });
+
+      if (!pick) return;
+
+      if (pick.label.includes('Pair new phone')) {
+        openPairingPanel();
+      } else if (pick.label.includes('Show logs')) {
+        out.show(true);
+      } else if (pick.label.includes('Disconnect all')) {
+        bridgeCore?.disconnect();
+        await savePairedPhones(context, []);
+        bridgeCore?.relay.updatePairedPhones([]);
+        statusBar?.setReady(0);
+        vscode.window.showInformationMessage('Codedeck: Disconnected and unpaired all phones');
+      }
+    }),
+  );
 
   context.subscriptions.push(
     vscode.commands.registerCommand('codedeck.pair', () => {
-      if (!bridgeCore) { return; }
-
-      showPairingPanel(
-        context,
-        {
-          npub: bridgeCore.relay.npub,
-          relays,
-          machine: machineName,
-        },
-        async (pubkeyInput: string, label: string) => {
-          // Decode npub if needed
-          let pubkeyHex: string;
-          if (pubkeyInput.startsWith('npub1')) {
-            try {
-              const decoded = nip19.decode(pubkeyInput);
-              if (decoded.type !== 'npub') {
-                vscode.window.showErrorMessage('Invalid npub');
-                return;
-              }
-              pubkeyHex = decoded.data as string;
-            } catch {
-              vscode.window.showErrorMessage('Invalid npub format');
-              return;
-            }
-          } else {
-            pubkeyHex = pubkeyInput;
-          }
-
-          // Add to paired phones
-          const phone: PairedPhone = {
-            npub: nip19.npubEncode(pubkeyHex),
-            pubkeyHex,
-            label,
-            pairedAt: new Date().toISOString(),
-          };
-
-          const phones = loadPairedPhones(context);
-          // Don't add duplicate
-          if (phones.some(p => p.pubkeyHex === pubkeyHex)) {
-            vscode.window.showInformationMessage(`Phone "${label}" is already paired`);
-            return;
-          }
-
-          phones.push(phone);
-          try {
-            await savePairedPhones(context, phones);
-          } catch (err) {
-            console.error('[Codedeck] Failed to save paired phones:', err);
-            vscode.window.showErrorMessage('Codedeck: Failed to save phone pairing');
-            return;
-          }
-
-          // Reconnect relay with new phone
-          bridgeCore?.relay.updatePairedPhones(phones);
-          if (!bridgeCore?.relay.isConnected()) {
-            bridgeCore?.connect();
-          }
-          statusBar?.setReady(phones.length);
-
-          // Send current session list to the new phone
-          if (sessionWatcher) {
-            bridgeCore?.onSessionListChanged(enrichWithTerminalStatus(sessionWatcher.getSessions()));
-          }
-        },
-      );
+      openPairingPanel();
     }),
   );
 
@@ -240,12 +303,16 @@ export function activate(context: vscode.ExtensionContext): void {
         `Relays: ${relays.join(', ')}`,
         `Connected: ${connected ? 'Yes' : 'No'}`,
         `Paired phones: ${phones.length}`,
-        ...phones.map(p => `  - ${p.label} (${p.npub.slice(0, 16)}...)`),
+        ...phones.map(p => `  - ${p.label} (${p.npub.slice(0, 20)}...)`),
         `Sessions detected: ${sessions.length}`,
         ...sessions.slice(0, 10).map(s => `  - ${s.slug} (${s.cwd})`),
       ];
 
-      vscode.window.showInformationMessage(lines.join('\n'), { modal: true });
+      // Non-modal: show in output channel instead of blocking dialog
+      out.clear();
+      out.appendLine('=== Codedeck Bridge Status ===');
+      lines.forEach(l => out.appendLine(l));
+      out.show(true);
     }),
   );
 
@@ -264,7 +331,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.workspace.onDidChangeConfiguration(e => {
       if (e.affectsConfiguration('codedeck.relays')) {
         const newRelays = vscode.workspace.getConfiguration('codedeck').get<string[]>('relays', ['wss://relay.nos.social', 'wss://relay.primal.net', 'wss://nos.lol']);
-        statusBar?.setOffline(); // Transitional state while reconnecting
+        statusBar?.setConnecting();
         bridgeCore?.relay.updateRelays(newRelays);
         console.log('[Codedeck] Relays updated:', newRelays);
       }
@@ -290,7 +357,7 @@ export async function deactivate(): Promise<void> {
   if (ts && ts > 0 && extensionContext) {
     await extensionContext.globalState.update('codedeck_lastSeenTimestamp', ts);
   }
-  bridgeCore?.disconnect();
+  bridgeCore?.relay.dispose();
   sessionWatcher?.dispose();
   statusBar?.dispose();
   extensionContext = undefined;
