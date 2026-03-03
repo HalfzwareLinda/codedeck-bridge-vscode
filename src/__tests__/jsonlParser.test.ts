@@ -466,7 +466,7 @@ describe('extractPermissionMode', () => {
   });
 });
 
-describe('toolNeedsPermission (denylist approach)', () => {
+describe('toolNeedsPermission (denylist + same-batch detection)', () => {
   it('requires permission for tools that can prompt', () => {
     expect(toolNeedsPermission('Bash')).toBe(true);
     expect(toolNeedsPermission('Edit')).toBe(true);
@@ -480,16 +480,17 @@ describe('toolNeedsPermission (denylist approach)', () => {
     expect(toolNeedsPermission('EnterPlanMode')).toBe(true);
   });
 
-  it('does not require permission for denylisted read-only/silent tools', () => {
-    expect(toolNeedsPermission('Read')).toBe(false);
-    expect(toolNeedsPermission('Glob')).toBe(false);
-    expect(toolNeedsPermission('Grep')).toBe(false);
+  it('requires permission for configurable read-only tools (can be ask-gated via custom rules)', () => {
+    expect(toolNeedsPermission('Read')).toBe(true);
+    expect(toolNeedsPermission('Glob')).toBe(true);
+    expect(toolNeedsPermission('Grep')).toBe(true);
+  });
+
+  it('does not require permission for truly internal bookkeeping tools', () => {
     expect(toolNeedsPermission('TodoWrite')).toBe(false);
     expect(toolNeedsPermission('TodoRead')).toBe(false);
     expect(toolNeedsPermission('TaskOutput')).toBe(false);
     expect(toolNeedsPermission('TaskStop')).toBe(false);
-    expect(toolNeedsPermission('ExitPlanMode')).toBe(false);
-    expect(toolNeedsPermission('AskUserQuestion')).toBe(false);
   });
 
   it('assumes unknown/new tools need permission (safe default)', () => {
@@ -499,6 +500,6 @@ describe('toolNeedsPermission (denylist approach)', () => {
 
   it('ignores permissionMode parameter (mode-independent)', () => {
     expect(toolNeedsPermission('Bash', 'bypassPermissions')).toBe(true);
-    expect(toolNeedsPermission('Read', 'default')).toBe(false);
+    expect(toolNeedsPermission('Read', 'default')).toBe(true);
   });
 });

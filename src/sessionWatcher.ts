@@ -425,11 +425,9 @@ export class SessionWatcher implements vscode.Disposable {
         this.resolvedToolIds.set(meta.sessionId, resolved);
       }
 
-      // Pass 2: inject permission_request entries BEFORE updating resolvedToolIds
-      // with this batch's tool_results. This ensures that when a tool_use and its
-      // tool_result arrive in the same batch (e.g. 2s poll picks up both lines),
-      // the permission card is still injected. The phone-side answeredMap will
-      // auto-suppress it if the tool_result is also present.
+      // Pass 2: inject permission_request entries. injectPermissionRequests() does
+      // its own same-batch detection: if a tool_use and its tool_result are both
+      // in this batch, the tool was auto-approved and no card is injected.
       const withPermissions = this.injectPermissionRequests(batchEntries, resolved);
 
       // NOW update resolvedToolIds with this batch's tool_results (for future batches)
@@ -526,9 +524,11 @@ export class SessionWatcher implements vscode.Disposable {
    * For each tool_use entry that might need permission, append a
    * permission_request system entry right after it.
    *
-   * Uses a denylist approach: any tool NOT in NEVER_NEEDS_PERMISSION is
-   * assumed to potentially prompt. False positives are harmless — the
-   * phone auto-suppresses the card when the tool_result arrives.
+   * Uses same-batch detection: if a tool_use and its tool_result both
+   * appear in the same batch, the tool was auto-approved — no permission
+   * card needed. Only injects cards for tool_use entries that have no
+   * matching tool_result in the current batch (i.e. Claude Code is
+   * blocked waiting for user approval).
    *
    * `resolvedIds` contains tool_use_ids from previous batches that already
    * have a matching tool_result — these are completed and should not
@@ -538,13 +538,25 @@ export class SessionWatcher implements vscode.Disposable {
     entries: OutputEntry[],
     resolvedIds: Set<string> = new Set(),
   ): OutputEntry[] {
+    // Pre-scan: collect tool_use_ids that have a tool_result in THIS batch.
+    // If both arrive in the same 2s poll window, the tool was auto-approved.
+    const batchResolvedIds = new Set<string>();
+    for (const entry of entries) {
+      if (entry.entryType === 'tool_result') {
+        const id = entry.metadata?.tool_use_id as string | undefined;
+        if (id) { batchResolvedIds.add(id); }
+      }
+    }
+
     const result: OutputEntry[] = [];
     for (const entry of entries) {
       result.push(entry);
       if (entry.entryType === 'tool_use') {
         const toolName = (entry.metadata?.tool_name as string) ?? '';
         const toolUseId = (entry.metadata?.tool_use_id as string) ?? '';
-        if (toolName && toolNeedsPermission(toolName) && !resolvedIds.has(toolUseId)) {
+        if (toolName && toolNeedsPermission(toolName)
+            && !resolvedIds.has(toolUseId)
+            && !batchResolvedIds.has(toolUseId)) {
           console.log(`[Codedeck] Injected permission_request for ${toolName} (id=${toolUseId})`);
           result.push({
             entryType: 'system',

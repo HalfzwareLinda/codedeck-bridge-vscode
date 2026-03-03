@@ -15,13 +15,15 @@ import type { ClaudeJsonlLine, ClaudeContentBlock, OutputEntry } from './types';
 
 // --- Permission detection ---
 
-/** Tools that NEVER show a permission prompt in Claude Code.
- *  Everything else is assumed to potentially prompt — if auto-approved,
- *  the tool_result arrives in the same poll batch and the phone suppresses
- *  the permission card before the user sees it. */
+/** Truly internal bookkeeping tools that Claude Code never prompts for
+ *  under any permission configuration. Everything else is assumed to
+ *  potentially prompt. The bridge uses same-batch detection (tool_use +
+ *  tool_result in the same poll batch → auto-approved → skip injection)
+ *  to avoid generating unnecessary permission_request events for tools
+ *  like Read/Glob/Grep that are normally auto-approved but CAN be
+ *  configured to require permission via custom rules. */
 const NEVER_NEEDS_PERMISSION = new Set([
-  'Read', 'Glob', 'Grep', 'TodoWrite', 'TodoRead',
-  'TaskOutput', 'TaskStop', 'ExitPlanMode', 'AskUserQuestion',
+  'TodoWrite', 'TodoRead', 'TaskOutput', 'TaskStop',
 ]);
 
 /** Extract the permissionMode field from a raw JSONL line (only present on user entries). */
@@ -36,9 +38,10 @@ export function extractPermissionMode(line: string): string | undefined {
 }
 
 /** Check whether a tool might show a permission prompt.
- *  Uses a denylist: anything not in NEVER_NEEDS_PERMISSION is assumed to
- *  potentially prompt. False positives are harmless — the phone auto-suppresses
- *  the card when the tool_result arrives in the same batch. */
+ *  Uses a small denylist of truly internal tools. Everything else (including
+ *  Read/Glob/Grep) is assumed to potentially prompt — the bridge's same-batch
+ *  detection in injectPermissionRequests() suppresses cards for auto-approved
+ *  tools without Nostr overhead. */
 export function toolNeedsPermission(toolName: string, _permissionMode?: string): boolean {
   return !NEVER_NEEDS_PERMISSION.has(toolName);
 }
