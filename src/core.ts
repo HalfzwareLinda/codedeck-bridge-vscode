@@ -26,6 +26,8 @@ export interface BridgeCoreConfig {
 
 export interface TerminalSender {
   sendText: (text: string, sessionId?: string) => Promise<boolean>;
+  /** Send a single raw keypress to the terminal (no Escape+Enter wrapping). */
+  sendKeypress: (key: string, sessionId?: string) => Promise<boolean>;
   /** Spawn a new Claude Code terminal with a specific session ID. Returns immediately. */
   createSession: (sessionId: string, cwd?: string) => void;
   notifyNoTerminal: () => void;
@@ -126,7 +128,7 @@ export class BridgeCore {
           answer = allow ? 'y' : 'n';
         }
         this.log(`[Codedeck] Permission response for session ${sessionId}: ${answer}`);
-        const sent = await this.terminal.sendText(answer, sessionId);
+        const sent = await this.terminal.sendKeypress(answer, sessionId);
         if (!sent) {
           this.log(`[Codedeck] WARNING: Failed to deliver permission ${answer} to terminal for ${sessionId}`);
         }

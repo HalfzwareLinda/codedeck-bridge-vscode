@@ -156,6 +156,26 @@ export class TerminalRegistry implements vscode.Disposable {
   }
 
   /**
+   * Send a single raw keypress to a Claude Code terminal without the
+   * Escape+Enter workaround. Used for permission prompts where Claude Code
+   * reads single keypresses in raw mode (y/n/a/d).
+   */
+  async sendKeypress(key: string, sessionId?: string): Promise<boolean> {
+    if (sessionId) {
+      const known = this.sessionTerminals.get(sessionId);
+      if (known && known.exitStatus === undefined) {
+        console.log(`[Codedeck] sendKeypress delivered to terminal for session ${sessionId}: ${key}`);
+        known.sendText(key, false);
+        return true;
+      }
+      if (known) {
+        this.sessionTerminals.delete(sessionId);
+      }
+    }
+    return false;
+  }
+
+  /**
    * Send text input to a Claude Code terminal.
    *
    * Only sends to a terminal with a confirmed sessionId mapping.
