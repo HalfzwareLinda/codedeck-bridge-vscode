@@ -159,7 +159,7 @@ function getPairingHtml(pairingUrl: string, info: PairingInfo): string {
       const label = document.getElementById('phoneLabel').value.trim() || 'Phone';
 
       if (!npub.startsWith('npub1')) {
-        alert('Please enter a valid npub (starts with npub1)');
+        alert('Invalid format. Enter an npub (npub1...) or paste from the Codedeck app settings.');
         return;
       }
 

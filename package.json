@@ -21,6 +21,10 @@
   "contributes": {
     "commands": [
       {
+        "command": "codedeck.quickMenu",
+        "title": "Codedeck: Quick Menu"
+      },
+      {
         "command": "codedeck.pair",
         "title": "Codedeck: Pair Phone"
       },
