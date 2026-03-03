@@ -16,10 +16,14 @@ Bridges Claude Code sessions running in VSCode to the [Codedeck](https://github.
 - QR code pairing via `codedeck://` deep links
 - NIP-44 encrypted communication over configurable Nostr relays
 - Bidirectional: send input, approve permissions, and change modes from your phone
+- **Permission request cards**: Detects tool permission prompts and forwards interactive Allow/Deny/Always cards to the phone
 - **Plan approval forwarding**: ExitPlanMode tool calls parsed and forwarded as interactive cards
 - **Question forwarding**: AskUserQuestion tool calls forwarded as multi-choice question cards
-- **Remote session creation**: Start new Claude Code terminals from the phone
+- **Image upload relay**: Reassembles chunked image uploads from the phone and writes to `.codedeck/uploads/`
+- **Remote session creation**: Start new Claude Code terminals from the phone with direct `claude --session-id` spawning
+- **Session title back-fill**: Extracts first user message for sessions with missing titles
 - History catch-up on reconnect with sequence-based gap detection
+- Relay rate-limit resilience for session-ready events
 - Status bar indicator showing connection state
 
 ## Commands
@@ -30,7 +34,7 @@ Bridges Claude Code sessions running in VSCode to the [Codedeck](https://github.
 
 ## Settings
 
-- `codedeck.relays` — Nostr relay URLs (default: `wss://relay.damus.io`, `wss://nos.lol`)
+- `codedeck.relays` — Nostr relay URLs (default: `wss://relay.nos.social`, `wss://relay.primal.net`, `wss://nos.lol`)
 - `codedeck.machineName` — Display name for this machine (defaults to hostname)
 
 ## Development
