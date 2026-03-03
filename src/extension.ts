@@ -283,12 +283,12 @@ export function activate(context: vscode.ExtensionContext): void {
   console.log(`[Codedeck] Extension activated. Machine: ${machineName}, Relays: ${relays.join(', ')}, Phones: ${pairedPhones.length}`);
 }
 
-export function deactivate(): void {
+export async function deactivate(): Promise<void> {
   console.log('[Codedeck] Extension deactivating...');
-  // Persist last-seen timestamp before shutdown (fire-and-forget)
+  // Persist last-seen timestamp before shutdown
   const ts = bridgeCore?.relay.lastSeenTimestamp;
   if (ts && ts > 0 && extensionContext) {
-    extensionContext.globalState.update('codedeck_lastSeenTimestamp', ts);
+    await extensionContext.globalState.update('codedeck_lastSeenTimestamp', ts);
   }
   bridgeCore?.disconnect();
   sessionWatcher?.dispose();

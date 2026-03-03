@@ -37,6 +37,8 @@ export class SessionWatcher implements vscode.Disposable {
   private claudeDir: string;
   private workspaceCwd: string | undefined;
   private pollInterval: NodeJS.Timeout | null = null;
+  /** Guard against concurrent readNewLines for the same file. */
+  private readingFiles = new Set<string>();
   private emitDebounceTimer: NodeJS.Timeout | null = null;
   private pollCount = 0;
   private static readonly NEW_FILE_SCAN_EVERY_N_POLLS = 3; // scan for new files every 3rd poll (every 6s)
@@ -320,6 +322,9 @@ export class SessionWatcher implements vscode.Disposable {
   }
 
   private readNewLines(filePath: string): void {
+    // Prevent concurrent reads of the same file (onFileCreated vs pollActiveFiles race)
+    if (this.readingFiles.has(filePath)) { return; }
+    this.readingFiles.add(filePath);
     try {
       const stat = fs.statSync(filePath);
       const offset = this.fileOffsets.get(filePath) ?? 0;
@@ -476,6 +481,8 @@ export class SessionWatcher implements vscode.Disposable {
       }
     } catch (err) {
       console.warn(`[Codedeck] readNewLines failed for ${path.basename(filePath)}:`, err);
+    } finally {
+      this.readingFiles.delete(filePath);
     }
   }
 

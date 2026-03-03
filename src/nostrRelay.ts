@@ -356,11 +356,26 @@ export class NostrRelay {
       this.outputQueue.push({ sessionId, seq, entry });
     }
 
-    // Cap queue to prevent unbounded growth during relay outages
+    // Cap queue to prevent unbounded growth during relay outages.
+    // Inject a system entry so the phone knows output was lost.
     if (this.outputQueue.length > NostrRelay.MAX_OUTPUT_QUEUE_SIZE) {
       const dropped = this.outputQueue.length - NostrRelay.MAX_OUTPUT_QUEUE_SIZE;
+      const droppedSessionId = this.outputQueue[0].sessionId;
       this.outputQueue.splice(0, dropped);
       this.log(`[Codedeck] Output queue overflow: dropped ${dropped} oldest entries`);
+
+      // Prepend a notification entry so the phone sees the gap
+      const gapEntry: { sessionId: string; seq: number; entry: OutputEntry } = {
+        sessionId: droppedSessionId,
+        seq: this.outputQueue.length > 0 ? this.outputQueue[0].seq - 1 : 0,
+        entry: {
+          entryType: 'system',
+          content: `[Bridge: relay outage — ${dropped} output entries were lost]`,
+          timestamp: new Date().toISOString(),
+          metadata: { special: 'queue_overflow' },
+        },
+      };
+      this.outputQueue.unshift(gapEntry);
     }
 
     // Start flush timer if not already running

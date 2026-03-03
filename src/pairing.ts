@@ -28,7 +28,8 @@ export function showPairingPanel(
     { enableScripts: true },
   );
 
-  const pairingUrl = `codedeck://pair?npub=${pairingInfo.npub}&relays=${pairingInfo.relays.join(',')}&machine=${encodeURIComponent(pairingInfo.machine)}`;
+  const relaysParam = pairingInfo.relays.map(r => encodeURIComponent(r)).join(',');
+  const pairingUrl = `codedeck://pair?npub=${pairingInfo.npub}&relays=${relaysParam}&machine=${encodeURIComponent(pairingInfo.machine)}`;
 
   panel.webview.html = getPairingHtml(pairingUrl, pairingInfo);
 
