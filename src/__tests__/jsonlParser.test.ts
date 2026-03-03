@@ -466,41 +466,39 @@ describe('extractPermissionMode', () => {
   });
 });
 
-describe('toolNeedsPermission', () => {
-  it('requires permission for Bash/Edit/Write/NotebookEdit in default mode', () => {
-    expect(toolNeedsPermission('Bash', 'default')).toBe(true);
-    expect(toolNeedsPermission('Edit', 'default')).toBe(true);
-    expect(toolNeedsPermission('Write', 'default')).toBe(true);
-    expect(toolNeedsPermission('NotebookEdit', 'default')).toBe(true);
+describe('toolNeedsPermission (denylist approach)', () => {
+  it('requires permission for tools that can prompt', () => {
+    expect(toolNeedsPermission('Bash')).toBe(true);
+    expect(toolNeedsPermission('Edit')).toBe(true);
+    expect(toolNeedsPermission('Write')).toBe(true);
+    expect(toolNeedsPermission('NotebookEdit')).toBe(true);
+    expect(toolNeedsPermission('WebFetch')).toBe(true);
+    expect(toolNeedsPermission('WebSearch')).toBe(true);
+    expect(toolNeedsPermission('Agent')).toBe(true);
+    expect(toolNeedsPermission('Skill')).toBe(true);
+    expect(toolNeedsPermission('EnterWorktree')).toBe(true);
+    expect(toolNeedsPermission('EnterPlanMode')).toBe(true);
   });
 
-  it('does not require permission for read-only tools in default mode', () => {
+  it('does not require permission for denylisted read-only/silent tools', () => {
+    expect(toolNeedsPermission('Read')).toBe(false);
+    expect(toolNeedsPermission('Glob')).toBe(false);
+    expect(toolNeedsPermission('Grep')).toBe(false);
+    expect(toolNeedsPermission('TodoWrite')).toBe(false);
+    expect(toolNeedsPermission('TodoRead')).toBe(false);
+    expect(toolNeedsPermission('TaskOutput')).toBe(false);
+    expect(toolNeedsPermission('TaskStop')).toBe(false);
+    expect(toolNeedsPermission('ExitPlanMode')).toBe(false);
+    expect(toolNeedsPermission('AskUserQuestion')).toBe(false);
+  });
+
+  it('assumes unknown/new tools need permission (safe default)', () => {
+    expect(toolNeedsPermission('SomeNewTool')).toBe(true);
+    expect(toolNeedsPermission('McpCustomTool')).toBe(true);
+  });
+
+  it('ignores permissionMode parameter (mode-independent)', () => {
+    expect(toolNeedsPermission('Bash', 'bypassPermissions')).toBe(true);
     expect(toolNeedsPermission('Read', 'default')).toBe(false);
-    expect(toolNeedsPermission('Glob', 'default')).toBe(false);
-    expect(toolNeedsPermission('Grep', 'default')).toBe(false);
-    expect(toolNeedsPermission('WebSearch', 'default')).toBe(false);
-  });
-
-  it('only requires permission for Bash in acceptEdits mode', () => {
-    expect(toolNeedsPermission('Bash', 'acceptEdits')).toBe(true);
-    expect(toolNeedsPermission('Edit', 'acceptEdits')).toBe(false);
-    expect(toolNeedsPermission('Write', 'acceptEdits')).toBe(false);
-    expect(toolNeedsPermission('NotebookEdit', 'acceptEdits')).toBe(false);
-  });
-
-  it('requires no permission in bypassPermissions mode', () => {
-    expect(toolNeedsPermission('Bash', 'bypassPermissions')).toBe(false);
-    expect(toolNeedsPermission('Edit', 'bypassPermissions')).toBe(false);
-    expect(toolNeedsPermission('Write', 'bypassPermissions')).toBe(false);
-  });
-
-  it('falls back to default (requires permission) for unknown permission modes', () => {
-    expect(toolNeedsPermission('Bash', 'unknownMode')).toBe(true);
-  });
-
-  it('plan mode matches default mode', () => {
-    expect(toolNeedsPermission('Bash', 'plan')).toBe(true);
-    expect(toolNeedsPermission('Edit', 'plan')).toBe(true);
-    expect(toolNeedsPermission('Read', 'plan')).toBe(false);
   });
 });

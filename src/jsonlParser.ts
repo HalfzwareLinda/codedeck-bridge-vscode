@@ -15,13 +15,14 @@ import type { ClaudeJsonlLine, ClaudeContentBlock, OutputEntry } from './types';
 
 // --- Permission detection ---
 
-/** Tools that require user permission in each permission mode. */
-const PERMISSION_TOOLS: Record<string, Set<string>> = {
-  default: new Set(['Bash', 'Edit', 'Write', 'NotebookEdit']),
-  plan: new Set(['Bash', 'Edit', 'Write', 'NotebookEdit']),
-  acceptEdits: new Set(['Bash']),
-  bypassPermissions: new Set(),
-};
+/** Tools that NEVER show a permission prompt in Claude Code.
+ *  Everything else is assumed to potentially prompt — if auto-approved,
+ *  the tool_result arrives in the same poll batch and the phone suppresses
+ *  the permission card before the user sees it. */
+const NEVER_NEEDS_PERMISSION = new Set([
+  'Read', 'Glob', 'Grep', 'TodoWrite', 'TodoRead',
+  'TaskOutput', 'TaskStop', 'ExitPlanMode', 'AskUserQuestion',
+]);
 
 /** Extract the permissionMode field from a raw JSONL line (only present on user entries). */
 export function extractPermissionMode(line: string): string | undefined {
@@ -34,10 +35,12 @@ export function extractPermissionMode(line: string): string | undefined {
   return undefined;
 }
 
-/** Check whether a tool requires user permission under the given permission mode. */
-export function toolNeedsPermission(toolName: string, permissionMode: string): boolean {
-  const tools = PERMISSION_TOOLS[permissionMode] ?? PERMISSION_TOOLS['default'];
-  return tools!.has(toolName);
+/** Check whether a tool might show a permission prompt.
+ *  Uses a denylist: anything not in NEVER_NEEDS_PERMISSION is assumed to
+ *  potentially prompt. False positives are harmless — the phone auto-suppresses
+ *  the card when the tool_result arrives in the same batch. */
+export function toolNeedsPermission(toolName: string, _permissionMode?: string): boolean {
+  return !NEVER_NEEDS_PERMISSION.has(toolName);
 }
 
 /**

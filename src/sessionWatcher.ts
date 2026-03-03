@@ -145,7 +145,7 @@ export class SessionWatcher implements vscode.Disposable {
         }
       }
 
-      const withPermissions = this.injectPermissionRequests(allParsed, currentMode, resolved);
+      const withPermissions = this.injectPermissionRequests(allParsed, resolved);
       for (const entry of withPermissions) {
         seq++;
         entries.push({ seq, entry });
@@ -430,25 +430,7 @@ export class SessionWatcher implements vscode.Disposable {
       // tool_result arrive in the same batch (e.g. 2s poll picks up both lines),
       // the permission card is still injected. The phone-side answeredMap will
       // auto-suppress it if the tool_result is also present.
-      const cachedMode = this.permissionModes.get(meta.sessionId) ?? 'default';
-      // If cached mode is bypassPermissions but this batch has tool_uses WITHOUT
-      // matching tool_results, the terminal is likely prompting (stale cached mode).
-      // Override to 'default' so permission cards are injected.
-      let currentMode = cachedMode;
-      if (cachedMode === 'bypassPermissions') {
-        const batchResultIds = new Set<string>();
-        for (const e of batchEntries) {
-          if (e.entryType === 'tool_result') {
-            const id = e.metadata?.tool_use_id as string | undefined;
-            if (id) { batchResultIds.add(id); }
-          }
-        }
-        const hasUnresolved = batchEntries.some(
-          e => e.entryType === 'tool_use' && !batchResultIds.has((e.metadata?.tool_use_id as string) ?? ''),
-        );
-        if (hasUnresolved) { currentMode = 'default'; }
-      }
-      const withPermissions = this.injectPermissionRequests(batchEntries, currentMode, resolved);
+      const withPermissions = this.injectPermissionRequests(batchEntries, resolved);
 
       // NOW update resolvedToolIds with this batch's tool_results (for future batches)
       for (const entry of batchEntries) {
@@ -541,8 +523,12 @@ export class SessionWatcher implements vscode.Disposable {
   }
 
   /**
-   * For each tool_use entry that needs permission under the current mode,
-   * append a permission_request system entry right after it.
+   * For each tool_use entry that might need permission, append a
+   * permission_request system entry right after it.
+   *
+   * Uses a denylist approach: any tool NOT in NEVER_NEEDS_PERMISSION is
+   * assumed to potentially prompt. False positives are harmless — the
+   * phone auto-suppresses the card when the tool_result arrives.
    *
    * `resolvedIds` contains tool_use_ids from previous batches that already
    * have a matching tool_result — these are completed and should not
@@ -550,7 +536,6 @@ export class SessionWatcher implements vscode.Disposable {
    */
   private injectPermissionRequests(
     entries: OutputEntry[],
-    permissionMode: string,
     resolvedIds: Set<string> = new Set(),
   ): OutputEntry[] {
     const result: OutputEntry[] = [];
@@ -559,8 +544,8 @@ export class SessionWatcher implements vscode.Disposable {
       if (entry.entryType === 'tool_use') {
         const toolName = (entry.metadata?.tool_name as string) ?? '';
         const toolUseId = (entry.metadata?.tool_use_id as string) ?? '';
-        if (toolName && toolNeedsPermission(toolName, permissionMode) && !resolvedIds.has(toolUseId)) {
-          console.log(`[Codedeck] Injected permission_request for ${toolName} (id=${toolUseId}, mode=${permissionMode})`);
+        if (toolName && toolNeedsPermission(toolName) && !resolvedIds.has(toolUseId)) {
+          console.log(`[Codedeck] Injected permission_request for ${toolName} (id=${toolUseId})`);
           result.push({
             entryType: 'system',
             content: entry.content, // e.g. "Bash: git status"
@@ -572,7 +557,7 @@ export class SessionWatcher implements vscode.Disposable {
               tool_input: entry.metadata?.tool_input,
             },
           });
-        } else if (toolName && toolNeedsPermission(toolName, permissionMode)) {
+        } else if (toolName && toolNeedsPermission(toolName)) {
           console.log(`[Codedeck] Suppressed permission_request for ${toolName} (id=${toolUseId}, already resolved)`);
         }
       }
