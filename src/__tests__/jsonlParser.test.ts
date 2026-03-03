@@ -494,8 +494,8 @@ describe('toolNeedsPermission', () => {
     expect(toolNeedsPermission('Write', 'bypassPermissions')).toBe(false);
   });
 
-  it('returns false for unknown permission modes', () => {
-    expect(toolNeedsPermission('Bash', 'unknownMode')).toBe(false);
+  it('falls back to default (requires permission) for unknown permission modes', () => {
+    expect(toolNeedsPermission('Bash', 'unknownMode')).toBe(true);
   });
 
   it('plan mode matches default mode', () => {

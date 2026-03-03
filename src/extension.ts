@@ -88,6 +88,7 @@ export function activate(context: vscode.ExtensionContext): void {
     {
       sendText: (text, sessionId?) => terminalRegistry.sendText(text, sessionId),
       sendKeypress: (key, sessionId?) => terminalRegistry.sendKeypress(key, sessionId),
+      sendShiftTab: (sessionId) => terminalRegistry.sendShiftTab(sessionId),
       createSession: (sessionId, cwd?) => {
         log(`[Codedeck] Spawning Claude Code terminal with session-id=${sessionId}`);
         terminalRegistry.createSession(sessionId, cwd);

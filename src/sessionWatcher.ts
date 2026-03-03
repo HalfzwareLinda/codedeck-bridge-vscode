@@ -439,9 +439,21 @@ export class SessionWatcher implements vscode.Disposable {
         }
         history.push({ seq, entry });
 
-        // Cap history buffer
+        // Cap history buffer and prune resolvedToolIds to match
         if (history.length > MAX_HISTORY_PER_SESSION) {
           history.splice(0, history.length - MAX_HISTORY_PER_SESSION);
+          // Rebuild resolvedToolIds from surviving entries
+          const resolved = this.resolvedToolIds.get(meta.sessionId);
+          if (resolved && resolved.size > MAX_HISTORY_PER_SESSION) {
+            const newResolved = new Set<string>();
+            for (const h of history) {
+              if (h.entry.entryType === 'tool_result') {
+                const id = h.entry.metadata?.tool_use_id as string | undefined;
+                if (id) newResolved.add(id);
+              }
+            }
+            this.resolvedToolIds.set(meta.sessionId, newResolved);
+          }
         }
 
         seqEntries.push({ seq, entry });
@@ -754,6 +766,7 @@ export class SessionWatcher implements vscode.Disposable {
           lineCount: this.fileOffsets.get(filePath) ?? 0,
           title: meta.title ?? null,
           project: this.resolveProjectName(meta, filePath),
+          permissionMode: (this.permissionModes.get(meta.sessionId) as RemoteSessionInfo['permissionMode']) ?? undefined,
         });
       } catch {
         // File gone
@@ -762,6 +775,11 @@ export class SessionWatcher implements vscode.Disposable {
     // Sort by last activity, most recent first — cap to avoid oversized Nostr events
     sessions.sort((a, b) => b.lastActivity.localeCompare(a.lastActivity));
     return sessions.slice(0, MAX_SESSIONS);
+  }
+
+  /** Get the current permission mode for a session (from JSONL parsing). */
+  getPermissionMode(sessionId: string): string | undefined {
+    return this.permissionModes.get(sessionId);
   }
 
   private emitSessionList(): void {

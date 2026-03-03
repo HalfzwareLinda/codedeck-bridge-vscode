@@ -33,7 +33,7 @@ export interface NostrRelayEvents {
   onInput: (sessionId: string, text: string, phonePubkey: string) => void;
   onPermissionResponse: (sessionId: string, requestId: string, allow: boolean, modifier?: 'always' | 'never') => void;
   onKeypress: (sessionId: string, key: string) => void;
-  onModeChange: (sessionId: string, mode: 'plan' | 'auto') => void;
+  onModeChange: (sessionId: string, mode: string) => void;
   onHistoryRequest: (sessionId: string, afterSeq: number | undefined, phonePubkey: string) => void;
   onCreateSession: () => void;
   onRefreshSessions: () => void;
@@ -122,7 +122,7 @@ export class NostrRelay {
     this.disconnect();
     this.reconnecting = false;
 
-    this.pool = new SimplePool();
+    this.pool = new SimplePool({ enableReconnect: true });
 
     // Subscribe to events tagged to our pubkey from paired phones
     const phonePubkeys = this.pairedPhones.map(p => p.pubkeyHex);
@@ -153,6 +153,10 @@ export class NostrRelay {
           oneose: () => {
             this.log('[Codedeck] Connected to relays, subscription active');
             this.onConnectionChange?.('connected');
+          },
+          onclose: (reasons) => {
+            this.log(`[Codedeck] Relay subscription closed: ${JSON.stringify(reasons)}`);
+            this.onConnectionChange?.('disconnected', 'Relay connection lost — reconnecting');
           },
         },
       );
@@ -343,11 +347,20 @@ export class NostrRelay {
    * to avoid relay rate-limits. Each entry becomes a separate Nostr event
    * (preserving per-entry seq numbering) but they're sent in a timed batch.
    */
+  private static readonly MAX_OUTPUT_QUEUE_SIZE = 200;
+
   async publishOutput(sessionId: string, entries: Array<{ seq: number; entry: OutputEntry }>): Promise<void> {
     if (!this.pool || this.pairedPhones.length === 0) { return; }
 
     for (const { seq, entry } of entries) {
       this.outputQueue.push({ sessionId, seq, entry });
+    }
+
+    // Cap queue to prevent unbounded growth during relay outages
+    if (this.outputQueue.length > NostrRelay.MAX_OUTPUT_QUEUE_SIZE) {
+      const dropped = this.outputQueue.length - NostrRelay.MAX_OUTPUT_QUEUE_SIZE;
+      this.outputQueue.splice(0, dropped);
+      this.log(`[Codedeck] Output queue overflow: dropped ${dropped} oldest entries`);
     }
 
     // Start flush timer if not already running

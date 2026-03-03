@@ -29,6 +29,8 @@ export interface TerminalSender {
   sendText: (text: string, sessionId?: string) => Promise<boolean>;
   /** Send a single raw keypress to the terminal (no Escape+Enter wrapping). */
   sendKeypress: (key: string, sessionId?: string) => Promise<boolean>;
+  /** Send Shift+Tab to cycle Claude Code's permission mode. */
+  sendShiftTab: (sessionId: string) => Promise<boolean>;
   /** Spawn a new Claude Code terminal with a specific session ID. Returns immediately. */
   createSession: (sessionId: string, cwd?: string) => void;
   /** Queue input for a session that was just relaunched (delayed delivery). */
@@ -42,6 +44,8 @@ export interface SessionProvider {
   loadFullHistory: (sessionId: string) => Array<{ seq: number; entry: OutputEntry }>;
   getHistoryCount: (sessionId: string) => number;
   rescanSessions?: () => void;
+  /** Get the current permission mode for a session (from JSONL parsing). */
+  getPermissionMode?: (sessionId: string) => string | undefined;
 }
 
 /**
@@ -170,15 +174,9 @@ export class BridgeCore {
       },
       onModeChange: (sessionId, mode) => {
         this.log(`[Codedeck] Mode change for session ${sessionId}: ${mode}`);
-        if (mode === 'plan') {
-          // /plan slash command enters plan mode
-          this.terminal.sendText('/plan', sessionId).catch(err => {
-            console.error('[Codedeck] Mode change send failed:', err);
-          });
-        } else {
-          // No reliable terminal command to exit plan mode — phone tracks optimistically
-          this.log(`[Codedeck] Auto mode for ${sessionId} — tracked on phone only`);
-        }
+        this.cycleToMode(sessionId, mode).catch(err => {
+          console.error('[Codedeck] Mode cycle failed:', err);
+        });
       },
       onHistoryRequest: (sessionId, afterSeq, phonePubkey) => {
         console.log(`[Codedeck] History request for ${sessionId} (afterSeq: ${afterSeq})`);
@@ -224,6 +222,85 @@ export class BridgeCore {
   /** Set the session data provider (e.g., SessionWatcher). */
   setSessionProvider(provider: SessionProvider): void {
     this.sessionProvider = provider;
+  }
+
+  /**
+   * Cycle the terminal's permission mode via Shift+Tab keypresses until we
+   * reach the target mode. Claude Code cycles: default → acceptEdits → plan → bypassPermissions.
+   * bypassPermissions is only in the cycle when allowDangerouslySkipPermissions is enabled.
+   */
+  private static readonly MODE_CYCLE = ['default', 'acceptEdits', 'plan', 'bypassPermissions'];
+  private static readonly SHIFT_TAB_DELAY_MS = 250;
+  private static readonly VERIFY_DELAY_MS = 500;
+  private static readonly MAX_CORRECTIONS = 2;
+
+  private async cycleToMode(sessionId: string, targetMode: string): Promise<void> {
+    const currentMode = this.sessionProvider?.getPermissionMode?.(sessionId) ?? 'default';
+    if (currentMode === targetMode) {
+      this.log(`[Codedeck] Already in ${targetMode} mode for ${sessionId}`);
+      return;
+    }
+
+    const cycle = BridgeCore.MODE_CYCLE;
+    const targetIndex = cycle.indexOf(targetMode);
+
+    if (targetIndex < 0) {
+      this.log(`[Codedeck] Unknown target mode: ${targetMode}`);
+      return;
+    }
+
+    // Fast path: send all Shift+Tabs based on cached mode
+    const sent = await this.sendShiftTabs(sessionId, currentMode, targetMode);
+    if (!sent) { return; }
+
+    // Verify: wait for JSONL to update, then check if we landed correctly
+    await new Promise(resolve => setTimeout(resolve, BridgeCore.VERIFY_DELAY_MS));
+    const actualMode = this.sessionProvider?.getPermissionMode?.(sessionId) ?? 'default';
+
+    if (actualMode === targetMode) {
+      this.log(`[Codedeck] Mode verified: ${targetMode} for ${sessionId}`);
+      return;
+    }
+
+    // Corrective cycles (e.g. bypassPermissions was skipped because the setting isn't enabled)
+    this.log(`[Codedeck] Mode mismatch: expected ${targetMode}, got ${actualMode} — correcting`);
+    for (let attempt = 0; attempt < BridgeCore.MAX_CORRECTIONS; attempt++) {
+      const corrected = await this.sendShiftTabs(sessionId, actualMode, targetMode);
+      if (!corrected) { return; }
+
+      await new Promise(resolve => setTimeout(resolve, BridgeCore.VERIFY_DELAY_MS));
+      const recheck = this.sessionProvider?.getPermissionMode?.(sessionId) ?? 'default';
+      if (recheck === targetMode) {
+        this.log(`[Codedeck] Mode corrected to ${targetMode} on attempt ${attempt + 1}`);
+        return;
+      }
+      this.log(`[Codedeck] Correction attempt ${attempt + 1} failed: got ${recheck}`);
+    }
+    this.log(`[Codedeck] Could not reach ${targetMode} for ${sessionId} — target may not be available`);
+  }
+
+  /** Send the calculated number of Shift+Tab presses to go from fromMode to toMode. */
+  private async sendShiftTabs(sessionId: string, fromMode: string, toMode: string): Promise<boolean> {
+    const cycle = BridgeCore.MODE_CYCLE;
+    const fromIndex = Math.max(0, cycle.indexOf(fromMode));
+    const toIndex = cycle.indexOf(toMode);
+    const steps = (toIndex - fromIndex + cycle.length) % cycle.length;
+
+    if (steps === 0) { return true; }
+
+    this.log(`[Codedeck] Sending ${steps} Shift+Tab(s) for ${sessionId}: ${fromMode} → ${toMode}`);
+
+    for (let i = 0; i < steps; i++) {
+      const sent = await this.terminal.sendShiftTab(sessionId);
+      if (!sent) {
+        this.log(`[Codedeck] Failed to send Shift+Tab for ${sessionId} (step ${i + 1}/${steps})`);
+        return false;
+      }
+      if (i < steps - 1) {
+        await new Promise(resolve => setTimeout(resolve, BridgeCore.SHIFT_TAB_DELAY_MS));
+      }
+    }
+    return true;
   }
 
   /** Called when new output is detected from session files. */

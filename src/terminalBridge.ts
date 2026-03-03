@@ -105,13 +105,14 @@ export class TerminalRegistry implements vscode.Disposable {
     // Temporal proximity matching for manually opened terminals
     const now = Date.now();
     this.recentTerminals = this.recentTerminals.filter(r => (now - r.openedAt) < 30_000);
-    const candidates = this.recentTerminals.filter(r => (now - r.openedAt) < 10_000);
+    const candidates = this.recentTerminals.filter(r => (now - r.openedAt) < 5_000);
 
     let matched: vscode.Terminal | null = null;
 
     if (candidates.length === 1) {
       matched = candidates[0].terminal;
-    } else {
+    } else if (candidates.length > 1) {
+      // Multiple recent terminals — only match on cwd, never guess
       const cwdBasename = cwd.split('/').pop() || '';
       if (cwdBasename) {
         for (const c of candidates) {
@@ -139,13 +140,7 @@ export class TerminalRegistry implements vscode.Disposable {
     const claudeTerminals = findClaudeTerminals();
     if (claudeTerminals.length === 0) { return; }
 
-    // Single terminal — high confidence match
-    if (claudeTerminals.length === 1) {
-      this.sessionTerminals.set(sessionId, claudeTerminals[0]);
-      return;
-    }
-
-    // Multiple terminals — try matching by cwd basename in terminal name
+    // Match by cwd basename in terminal name — never blindly map all sessions to one terminal
     const cwdBasename = cwd.split('/').pop() || '';
     if (cwdBasename) {
       for (const t of claudeTerminals) {
@@ -155,6 +150,7 @@ export class TerminalRegistry implements vscode.Disposable {
         }
       }
     }
+    // No cwd match — leave unmapped rather than guessing wrong
   }
 
   /**
@@ -179,6 +175,19 @@ export class TerminalRegistry implements vscode.Disposable {
   }
 
   /**
+   * Send Shift+Tab to cycle Claude Code's permission mode.
+   * The escape sequence \x1b[Z is the standard terminal encoding for Shift+Tab.
+   */
+  async sendShiftTab(sessionId: string): Promise<boolean> {
+    const known = this.sessionTerminals.get(sessionId);
+    if (known && known.exitStatus === undefined) {
+      known.sendText('\x1b[Z', false);
+      return true;
+    }
+    return false;
+  }
+
+  /**
    * Send a single raw keypress to a Claude Code terminal without the
    * Escape+Enter workaround. Used for permission prompts where Claude Code
    * reads single keypresses in raw mode (y/n/a/d).
@@ -197,14 +206,11 @@ export class TerminalRegistry implements vscode.Disposable {
     }
 
     // Fallback: try any live Claude terminal (best effort for manually opened sessions)
+    // DO NOT permanently map — the fallback may be wrong and could corrupt future routing
     const claudeTerminals = findClaudeTerminals().filter(t => t.exitStatus === undefined);
     if (claudeTerminals.length === 1) {
       console.log(`[Codedeck] sendKeypress fallback: single Claude terminal for session ${sessionId}: ${key}`);
       claudeTerminals[0].sendText(key, false);
-      // Establish mapping for future calls
-      if (sessionId) {
-        this.sessionTerminals.set(sessionId, claudeTerminals[0]);
-      }
       return true;
     }
 

@@ -16,6 +16,7 @@ export interface RemoteSessionInfo {
   title: string | null;
   project: string;
   hasTerminal?: boolean;
+  permissionMode?: PermissionMode;
 }
 
 export interface SessionListMessage {
@@ -66,10 +67,12 @@ export interface KeypressMessage {
   key: string;
 }
 
+export type PermissionMode = 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions';
+
 export interface ModeChangeMessage {
   type: 'mode';
   sessionId: string;
-  mode: 'plan' | 'auto';
+  mode: PermissionMode;
 }
 
 // --- History catch-up (phone → bridge → phone) ---

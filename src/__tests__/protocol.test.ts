@@ -153,7 +153,7 @@ describe('Protocol types', () => {
       const msg: ModeChangeMessage = {
         type: 'mode',
         sessionId: 'sess-1',
-        mode: 'auto',
+        mode: 'default',
       };
 
       const json = JSON.stringify(msg);
@@ -161,7 +161,7 @@ describe('Protocol types', () => {
 
       expect(parsed.type).toBe('mode');
       if (parsed.type === 'mode') {
-        expect(parsed.mode).toBe('auto');
+        expect(parsed.mode).toBe('default');
       }
     });
 
