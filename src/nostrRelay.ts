@@ -761,13 +761,16 @@ export class NostrRelay {
             .catch(err => console.error('[Codedeck] onInput handler error:', err));
           break;
         case 'permission-res':
-          this.events.onPermissionResponse(msg.sessionId, msg.requestId, msg.allow, msg.modifier);
+          Promise.resolve(this.events.onPermissionResponse(msg.sessionId, msg.requestId, msg.allow, msg.modifier))
+            .catch(err => console.error('[Codedeck] onPermissionResponse handler error:', err));
           break;
         case 'keypress':
-          this.events.onKeypress(msg.sessionId, msg.key);
+          Promise.resolve(this.events.onKeypress(msg.sessionId, msg.key))
+            .catch(err => console.error('[Codedeck] onKeypress handler error:', err));
           break;
         case 'mode':
-          this.events.onModeChange(msg.sessionId, msg.mode);
+          Promise.resolve(this.events.onModeChange(msg.sessionId, msg.mode))
+            .catch(err => console.error('[Codedeck] onModeChange handler error:', err));
           break;
         case 'history-request':
           this.events.onHistoryRequest(msg.sessionId, msg.afterSeq, event.pubkey);

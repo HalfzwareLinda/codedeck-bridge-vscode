@@ -144,6 +144,15 @@ export class TerminalRegistry implements vscode.Disposable {
     const claudeTerminals = findClaudeTerminals();
     if (claudeTerminals.length === 0) { return; }
 
+    // Match by session ID slug in terminal name (phone-created terminals use this naming)
+    const slug = sessionId.slice(0, 8);
+    for (const t of claudeTerminals) {
+      if (t.name.includes(slug)) {
+        this.sessionTerminals.set(sessionId, t);
+        return;
+      }
+    }
+
     // Match by cwd basename in terminal name — never blindly map all sessions to one terminal
     const cwdBasename = cwd.split('/').pop() || '';
     if (cwdBasename) {
@@ -154,7 +163,7 @@ export class TerminalRegistry implements vscode.Disposable {
         }
       }
     }
-    // No cwd match — leave unmapped rather than guessing wrong
+    // No match — leave unmapped rather than guessing wrong
   }
 
   /**
@@ -190,6 +199,15 @@ export class TerminalRegistry implements vscode.Disposable {
       known.sendText('\x1b[Z', false);
       return true;
     }
+    // Recover by slug match
+    const slug = sessionId.slice(0, 8);
+    const claudeTerminals = findClaudeTerminals().filter(t => t.exitStatus === undefined);
+    const matched = claudeTerminals.find(t => t.name.includes(slug));
+    if (matched) {
+      this.sessionTerminals.set(sessionId, matched);
+      matched.sendText('\x1b[Z', false);
+      return true;
+    }
     return false;
   }
 
@@ -211,15 +229,29 @@ export class TerminalRegistry implements vscode.Disposable {
       }
     }
 
-    // Fallback: try any live Claude terminal (best effort for manually opened sessions)
-    // DO NOT permanently map — the fallback may be wrong and could corrupt future routing
     const claudeTerminals = findClaudeTerminals().filter(t => t.exitStatus === undefined);
+
+    // Fallback 1: match by session ID slug in terminal name (phone-created terminals
+    // are named "Claude Code (abc12345)" — recovers mapping after extension reload)
+    if (sessionId) {
+      const slug = sessionId.slice(0, 8);
+      const matched = claudeTerminals.find(t => t.name.includes(slug));
+      if (matched) {
+        console.log(`[Codedeck] sendKeypress recovered terminal by slug ${slug} for session ${sessionId}: ${key}`);
+        this.sessionTerminals.set(sessionId, matched);
+        matched.sendText(key, false);
+        return true;
+      }
+    }
+
+    // Fallback 2: single Claude terminal (best effort for manually opened sessions)
     if (claudeTerminals.length === 1) {
       console.log(`[Codedeck] sendKeypress fallback: single Claude terminal for session ${sessionId}: ${key}`);
       claudeTerminals[0].sendText(key, false);
       return true;
     }
 
+    console.log(`[Codedeck] sendKeypress FAILED: no terminal found for session ${sessionId} (${claudeTerminals.length} Claude terminals open)`);
     return false;
   }
 
@@ -245,7 +277,21 @@ export class TerminalRegistry implements vscode.Disposable {
       }
     }
 
-    // 2. No mapped terminal — queue for potential future match, inform caller
+    // 2. Recover by session ID slug in terminal name (phone-created terminals
+    // are named "Claude Code (abc12345)" — recovers mapping after extension reload)
+    if (sessionId) {
+      const slug = sessionId.slice(0, 8);
+      const claudeTerminals = findClaudeTerminals().filter(t => t.exitStatus === undefined);
+      const matched = claudeTerminals.find(t => t.name.includes(slug));
+      if (matched) {
+        console.log(`[Codedeck] sendText recovered terminal by slug ${slug} for session ${sessionId}: ${text.slice(0, 50)}...`);
+        this.sessionTerminals.set(sessionId, matched);
+        await this.submitToTerminal(matched, text);
+        return true;
+      }
+    }
+
+    // 3. No mapped terminal — queue for potential future match, inform caller
     if (sessionId) {
       console.log(`[Codedeck] sendText QUEUED (no terminal mapping) for session ${sessionId}: ${text.slice(0, 50)}...`);
       this.pendingInputs.push({ text, sessionId, timestamp: Date.now() });
