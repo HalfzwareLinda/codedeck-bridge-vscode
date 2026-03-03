@@ -387,22 +387,45 @@ export class SessionWatcher implements vscode.Disposable {
         batchEntries.push(...entries);
       }
 
-      // Update the incremental resolvedToolIds set with tool_results from this batch
+      // Ensure persistent resolvedToolIds set exists for this session
       let resolved = this.resolvedToolIds.get(meta.sessionId);
       if (!resolved) {
         resolved = new Set();
         this.resolvedToolIds.set(meta.sessionId, resolved);
       }
+
+      // Pass 2: inject permission_request entries BEFORE updating resolvedToolIds
+      // with this batch's tool_results. This ensures that when a tool_use and its
+      // tool_result arrive in the same batch (e.g. 2s poll picks up both lines),
+      // the permission card is still injected. The phone-side answeredMap will
+      // auto-suppress it if the tool_result is also present.
+      const cachedMode = this.permissionModes.get(meta.sessionId) ?? 'default';
+      // If cached mode is bypassPermissions but this batch has tool_uses WITHOUT
+      // matching tool_results, the terminal is likely prompting (stale cached mode).
+      // Override to 'default' so permission cards are injected.
+      let currentMode = cachedMode;
+      if (cachedMode === 'bypassPermissions') {
+        const batchResultIds = new Set<string>();
+        for (const e of batchEntries) {
+          if (e.entryType === 'tool_result') {
+            const id = e.metadata?.tool_use_id as string | undefined;
+            if (id) { batchResultIds.add(id); }
+          }
+        }
+        const hasUnresolved = batchEntries.some(
+          e => e.entryType === 'tool_use' && !batchResultIds.has((e.metadata?.tool_use_id as string) ?? ''),
+        );
+        if (hasUnresolved) { currentMode = 'default'; }
+      }
+      const withPermissions = this.injectPermissionRequests(batchEntries, currentMode, resolved);
+
+      // NOW update resolvedToolIds with this batch's tool_results (for future batches)
       for (const entry of batchEntries) {
         if (entry.entryType === 'tool_result') {
           const id = entry.metadata?.tool_use_id as string | undefined;
           if (id) { resolved.add(id); }
         }
       }
-
-      // Pass 2: inject permission_request entries, skipping already-resolved tools
-      const currentMode = this.permissionModes.get(meta.sessionId) ?? 'default';
-      const withPermissions = this.injectPermissionRequests(batchEntries, currentMode, resolved);
 
       const seqEntries: Array<{ seq: number; entry: OutputEntry }> = [];
       for (const entry of withPermissions) {
@@ -475,9 +498,9 @@ export class SessionWatcher implements vscode.Disposable {
    * For each tool_use entry that needs permission under the current mode,
    * append a permission_request system entry right after it.
    *
-   * `resolvedIds` contains tool_use_ids that already have a matching
-   * tool_result in the same batch — these are auto-approved and should
-   * not generate a permission card on the phone.
+   * `resolvedIds` contains tool_use_ids from previous batches that already
+   * have a matching tool_result — these are completed and should not
+   * generate a permission card on the phone.
    */
   private injectPermissionRequests(
     entries: OutputEntry[],
@@ -491,6 +514,7 @@ export class SessionWatcher implements vscode.Disposable {
         const toolName = (entry.metadata?.tool_name as string) ?? '';
         const toolUseId = (entry.metadata?.tool_use_id as string) ?? '';
         if (toolName && toolNeedsPermission(toolName, permissionMode) && !resolvedIds.has(toolUseId)) {
+          console.log(`[Codedeck] Injected permission_request for ${toolName} (id=${toolUseId}, mode=${permissionMode})`);
           result.push({
             entryType: 'system',
             content: entry.content, // e.g. "Bash: git status"
@@ -502,6 +526,8 @@ export class SessionWatcher implements vscode.Disposable {
               tool_input: entry.metadata?.tool_input,
             },
           });
+        } else if (toolName && toolNeedsPermission(toolName, permissionMode)) {
+          console.log(`[Codedeck] Suppressed permission_request for ${toolName} (id=${toolUseId}, already resolved)`);
         }
       }
     }

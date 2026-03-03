@@ -36,8 +36,8 @@ export function extractPermissionMode(line: string): string | undefined {
 
 /** Check whether a tool requires user permission under the given permission mode. */
 export function toolNeedsPermission(toolName: string, permissionMode: string): boolean {
-  const tools = PERMISSION_TOOLS[permissionMode];
-  return tools ? tools.has(toolName) : false;
+  const tools = PERMISSION_TOOLS[permissionMode] ?? PERMISSION_TOOLS['default'];
+  return tools!.has(toolName);
 }
 
 /**
