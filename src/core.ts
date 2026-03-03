@@ -177,8 +177,8 @@ export class BridgeCore {
       },
       onModeChange: (sessionId, mode) => {
         this.log(`[Codedeck] Mode change for session ${sessionId}: ${mode}`);
-        this.cycleToMode(sessionId, mode).catch(err => {
-          console.error('[Codedeck] Mode cycle failed:', err);
+        this.applyModeChange(sessionId, mode).catch(err => {
+          console.error('[Codedeck] Mode change failed:', err);
         });
       },
       onHistoryRequest: (sessionId, afterSeq, phonePubkey) => {
@@ -228,58 +228,65 @@ export class BridgeCore {
   }
 
   /**
-   * Cycle the terminal's permission mode via Shift+Tab keypresses until we
-   * reach the target mode. Claude Code cycles: default → acceptEdits → plan → bypassPermissions.
-   * bypassPermissions is only in the cycle when allowDangerouslySkipPermissions is enabled.
+   * Mode cycling via Shift+Tab keypresses.
+   * Claude Code cycles: default → acceptEdits → plan (→ bypassPermissions if enabled).
+   *
+   * Uses optimistic tracking instead of JSONL verification because Claude Code
+   * only writes permissionMode to JSONL on user entries (not on mode changes).
+   * Passive drift correction via onPermissionModeObserved() catches mismatches
+   * when the next JSONL user entry eventually arrives.
    */
   private static readonly MODE_CYCLE = ['default', 'acceptEdits', 'plan', 'bypassPermissions'];
   private static readonly SHIFT_TAB_DELAY_MS = 250;
-  private static readonly VERIFY_DELAY_MS = 500;
-  private static readonly MAX_CORRECTIONS = 2;
 
-  private async cycleToMode(sessionId: string, targetMode: string): Promise<void> {
-    const currentMode = this.sessionProvider?.getPermissionMode?.(sessionId) ?? 'default';
-    if (currentMode === targetMode) {
+  /** Bridge-side tracked mode per session (authoritative for delta calculation). */
+  private trackedModes: Map<string, string> = new Map();
+  /** Serialization chain per session — prevents interleaved Shift+Tab sequences. */
+  private modeQueue: Map<string, Promise<void>> = new Map();
+
+  /**
+   * Called when a JSONL user entry reveals the actual permissionMode.
+   * If it contradicts trackedModes, update to the observed value (passive drift correction).
+   */
+  onPermissionModeObserved(sessionId: string, observedMode: string): void {
+    const tracked = this.trackedModes.get(sessionId);
+    if (tracked !== undefined && tracked !== observedMode) {
+      this.log(`[Codedeck] Mode drift detected for ${sessionId}: tracked=${tracked}, observed=${observedMode} — syncing`);
+      this.trackedModes.set(sessionId, observedMode);
+    } else if (tracked === undefined) {
+      // First observation — seed the tracked state
+      this.trackedModes.set(sessionId, observedMode);
+    }
+  }
+
+  private async applyModeChange(sessionId: string, targetMode: string): Promise<void> {
+    // Serialize per session: chain onto existing queue
+    const prev = this.modeQueue.get(sessionId) ?? Promise.resolve();
+    const next = prev.then(() => this.doModeSwitch(sessionId, targetMode)).catch(err => {
+      this.log(`[Codedeck] Mode switch error for ${sessionId}: ${err}`);
+    });
+    this.modeQueue.set(sessionId, next);
+    await next;
+  }
+
+  private async doModeSwitch(sessionId: string, targetMode: string): Promise<void> {
+    // Seed tracked mode from JSONL if we haven't tracked this session yet
+    if (!this.trackedModes.has(sessionId)) {
+      const jsonlMode = this.sessionProvider?.getPermissionMode?.(sessionId);
+      if (jsonlMode) { this.trackedModes.set(sessionId, jsonlMode); }
+    }
+
+    const currentTracked = this.trackedModes.get(sessionId) ?? 'default';
+    if (currentTracked === targetMode) {
       this.log(`[Codedeck] Already in ${targetMode} mode for ${sessionId}`);
       return;
     }
 
-    const cycle = BridgeCore.MODE_CYCLE;
-    const targetIndex = cycle.indexOf(targetMode);
-
-    if (targetIndex < 0) {
-      this.log(`[Codedeck] Unknown target mode: ${targetMode}`);
-      return;
+    const sent = await this.sendShiftTabs(sessionId, currentTracked, targetMode);
+    if (sent) {
+      this.trackedModes.set(sessionId, targetMode);
+      this.log(`[Codedeck] Mode optimistically tracked as ${targetMode} for ${sessionId}`);
     }
-
-    // Fast path: send all Shift+Tabs based on cached mode
-    const sent = await this.sendShiftTabs(sessionId, currentMode, targetMode);
-    if (!sent) { return; }
-
-    // Verify: wait for JSONL to update, then check if we landed correctly
-    await new Promise(resolve => setTimeout(resolve, BridgeCore.VERIFY_DELAY_MS));
-    const actualMode = this.sessionProvider?.getPermissionMode?.(sessionId) ?? 'default';
-
-    if (actualMode === targetMode) {
-      this.log(`[Codedeck] Mode verified: ${targetMode} for ${sessionId}`);
-      return;
-    }
-
-    // Corrective cycles (e.g. bypassPermissions was skipped because the setting isn't enabled)
-    this.log(`[Codedeck] Mode mismatch: expected ${targetMode}, got ${actualMode} — correcting`);
-    for (let attempt = 0; attempt < BridgeCore.MAX_CORRECTIONS; attempt++) {
-      const corrected = await this.sendShiftTabs(sessionId, actualMode, targetMode);
-      if (!corrected) { return; }
-
-      await new Promise(resolve => setTimeout(resolve, BridgeCore.VERIFY_DELAY_MS));
-      const recheck = this.sessionProvider?.getPermissionMode?.(sessionId) ?? 'default';
-      if (recheck === targetMode) {
-        this.log(`[Codedeck] Mode corrected to ${targetMode} on attempt ${attempt + 1}`);
-        return;
-      }
-      this.log(`[Codedeck] Correction attempt ${attempt + 1} failed: got ${recheck}`);
-    }
-    this.log(`[Codedeck] Could not reach ${targetMode} for ${sessionId} — target may not be available`);
   }
 
   /** Send the calculated number of Shift+Tab presses to go from fromMode to toMode. */

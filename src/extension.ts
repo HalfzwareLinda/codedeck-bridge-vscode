@@ -142,6 +142,9 @@ export function activate(context: vscode.ExtensionContext): void {
     onExistingSession: (sessionId, cwd) => {
       terminalRegistry.mapExistingSession(sessionId, cwd);
     },
+    onPermissionModeChanged: (sessionId, mode) => {
+      bridgeCore?.onPermissionModeObserved(sessionId, mode);
+    },
   }, workspaceCwd);
   context.subscriptions.push(sessionWatcher);
   sessionWatcher.start();

@@ -25,6 +25,8 @@ export interface SessionWatcherEvents {
   onSessionListChanged: (sessions: RemoteSessionInfo[]) => void;
   onNewSession?: (sessionId: string, cwd: string) => void;
   onExistingSession?: (sessionId: string, cwd: string) => void;
+  /** Fired when a JSONL user entry reveals the session's actual permissionMode. */
+  onPermissionModeChanged?: (sessionId: string, mode: string) => void;
 }
 
 export class SessionWatcher implements vscode.Disposable {
@@ -409,6 +411,7 @@ export class SessionWatcher implements vscode.Disposable {
         const mode = extractPermissionMode(line);
         if (mode) {
           this.permissionModes.set(meta.sessionId, mode);
+          this.events.onPermissionModeChanged?.(meta.sessionId, mode);
         }
 
         const entries = parseJsonlLine(line);

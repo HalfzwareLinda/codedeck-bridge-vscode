@@ -196,6 +196,8 @@ export class TerminalRegistry implements vscode.Disposable {
   async sendShiftTab(sessionId: string): Promise<boolean> {
     const known = this.sessionTerminals.get(sessionId);
     if (known && known.exitStatus === undefined) {
+      // Ensure terminal is visible (activates PTY) without stealing keyboard focus
+      known.show(false);
       known.sendText('\x1b[Z', false);
       return true;
     }
@@ -205,6 +207,7 @@ export class TerminalRegistry implements vscode.Disposable {
     const matched = claudeTerminals.find(t => t.name.includes(slug));
     if (matched) {
       this.sessionTerminals.set(sessionId, matched);
+      matched.show(false);
       matched.sendText('\x1b[Z', false);
       return true;
     }
