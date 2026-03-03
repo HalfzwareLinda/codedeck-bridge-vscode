@@ -58,6 +58,13 @@ export interface PermissionResponseMessage {
   modifier?: 'always' | 'never';
 }
 
+/** Single raw keypress for Claude Code's Ink TUI prompts (plan approval, question selection). */
+export interface KeypressMessage {
+  type: 'keypress';
+  sessionId: string;
+  key: string;
+}
+
 export interface ModeChangeMessage {
   type: 'mode';
   sessionId: string;
@@ -134,7 +141,7 @@ export interface SessionFailedMessage {
 // --- Union ---
 
 export type BridgeOutbound = SessionListMessage | OutputMessage | HistoryResponseMessage | SessionPendingMessage | SessionReadyMessage | SessionFailedMessage;
-export type BridgeInbound = InputMessage | PermissionResponseMessage | ModeChangeMessage | HistoryRequestMessage | CreateSessionMessage | RefreshSessionsMessage | UploadImageMessage;
+export type BridgeInbound = InputMessage | PermissionResponseMessage | KeypressMessage | ModeChangeMessage | HistoryRequestMessage | CreateSessionMessage | RefreshSessionsMessage | UploadImageMessage;
 export type BridgeMessage = BridgeOutbound | BridgeInbound;
 
 // --- Nostr event kinds ---

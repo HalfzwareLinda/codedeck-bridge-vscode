@@ -31,6 +31,7 @@ import { SESSION_LIST_EVENT_KIND, OUTPUT_EVENT_KIND } from './types';
 export interface NostrRelayEvents {
   onInput: (sessionId: string, text: string) => void;
   onPermissionResponse: (sessionId: string, requestId: string, allow: boolean, modifier?: 'always' | 'never') => void;
+  onKeypress: (sessionId: string, key: string) => void;
   onModeChange: (sessionId: string, mode: 'plan' | 'auto') => void;
   onHistoryRequest: (sessionId: string, afterSeq: number | undefined, phonePubkey: string) => void;
   onCreateSession: () => void;
@@ -665,6 +666,9 @@ export class NostrRelay {
           break;
         case 'permission-res':
           this.events.onPermissionResponse(msg.sessionId, msg.requestId, msg.allow, msg.modifier);
+          break;
+        case 'keypress':
+          this.events.onKeypress(msg.sessionId, msg.key);
           break;
         case 'mode':
           this.events.onModeChange(msg.sessionId, msg.mode);

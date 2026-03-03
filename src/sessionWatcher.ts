@@ -31,6 +31,8 @@ export class SessionWatcher implements vscode.Disposable {
   private sessionHistory: Map<string, Array<{ seq: number; entry: OutputEntry }>> = new Map();
   private seqCounters: Map<string, number> = new Map();
   private permissionModes: Map<string, string> = new Map();
+  /** Incrementally maintained set of tool_use_ids that have a tool_result per session. */
+  private resolvedToolIds: Map<string, Set<string>> = new Map();
   private events: SessionWatcherEvents;
   private claudeDir: string;
   private workspaceCwd: string | undefined;
@@ -116,15 +118,20 @@ export class SessionWatcher implements vscode.Disposable {
       }
       this.permissionModes.set(sessionId, currentMode);
 
-      const resolvedIds = new Set<string>();
+      // Build and cache the resolvedToolIds set so readNewLines can use it incrementally
+      let resolved = this.resolvedToolIds.get(sessionId);
+      if (!resolved) {
+        resolved = new Set();
+        this.resolvedToolIds.set(sessionId, resolved);
+      }
       for (const entry of allParsed) {
         if (entry.entryType === 'tool_result') {
           const id = entry.metadata?.tool_use_id as string | undefined;
-          if (id) { resolvedIds.add(id); }
+          if (id) { resolved.add(id); }
         }
       }
 
-      const withPermissions = this.injectPermissionRequests(allParsed, currentMode, resolvedIds);
+      const withPermissions = this.injectPermissionRequests(allParsed, currentMode, resolved);
       for (const entry of withPermissions) {
         seq++;
         entries.push({ seq, entry });
@@ -380,29 +387,22 @@ export class SessionWatcher implements vscode.Disposable {
         batchEntries.push(...entries);
       }
 
-      // Collect tool_use_ids that already have a tool_result — both in this batch
-      // AND in the existing session history (prevents brief permission card flash
-      // when tool_use and tool_result arrive in separate batches)
-      const resolvedIds = new Set<string>();
+      // Update the incremental resolvedToolIds set with tool_results from this batch
+      let resolved = this.resolvedToolIds.get(meta.sessionId);
+      if (!resolved) {
+        resolved = new Set();
+        this.resolvedToolIds.set(meta.sessionId, resolved);
+      }
       for (const entry of batchEntries) {
         if (entry.entryType === 'tool_result') {
           const id = entry.metadata?.tool_use_id as string | undefined;
-          if (id) { resolvedIds.add(id); }
-        }
-      }
-      const history = this.sessionHistory.get(meta.sessionId);
-      if (history) {
-        for (const { entry } of history) {
-          if (entry.entryType === 'tool_result') {
-            const id = entry.metadata?.tool_use_id as string | undefined;
-            if (id) { resolvedIds.add(id); }
-          }
+          if (id) { resolved.add(id); }
         }
       }
 
       // Pass 2: inject permission_request entries, skipping already-resolved tools
       const currentMode = this.permissionModes.get(meta.sessionId) ?? 'default';
-      const withPermissions = this.injectPermissionRequests(batchEntries, currentMode, resolvedIds);
+      const withPermissions = this.injectPermissionRequests(batchEntries, currentMode, resolved);
 
       const seqEntries: Array<{ seq: number; entry: OutputEntry }> = [];
       for (const entry of withPermissions) {
