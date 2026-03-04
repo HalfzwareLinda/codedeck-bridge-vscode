@@ -107,9 +107,10 @@ export interface RefreshSessionsMessage {
   type: 'refresh-sessions';
 }
 
-// --- Image upload (phone → bridge, chunked) ---
+// --- Image upload (phone → bridge) ---
 
-export interface UploadImageMessage {
+/** Legacy chunked upload (pre-Blossom) */
+export interface UploadImageChunkMessage {
   type: 'upload-image';
   sessionId: string;
   uploadId: string;
@@ -120,6 +121,20 @@ export interface UploadImageMessage {
   chunkIndex: number;
   totalChunks: number;
 }
+
+/** Blossom upload — single event with hash reference to encrypted blob */
+export interface UploadImageBlossomMessage {
+  type: 'upload-image';
+  sessionId: string;
+  hash: string;
+  url: string;
+  filename: string;
+  mimeType: string;
+  text: string;
+  sizeBytes: number;
+}
+
+export type UploadImageMessage = UploadImageChunkMessage | UploadImageBlossomMessage;
 
 // --- Two-phase session creation (bridge → phone) ---
 

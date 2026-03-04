@@ -37,7 +37,7 @@ export interface NostrRelayEvents {
   onHistoryRequest: (sessionId: string, afterSeq: number | undefined, phonePubkey: string) => void;
   onCreateSession: () => void;
   onRefreshSessions: () => void;
-  onUploadImage: (sessionId: string, uploadId: string, filename: string, mimeType: string, base64Data: string, text: string, chunkIndex: number, totalChunks: number) => void;
+  onUploadImage: (msg: import('./types').UploadImageMessage, phonePubkey: string) => void;
 }
 
 export class NostrRelay {
@@ -784,10 +784,7 @@ export class NostrRelay {
             .catch(err => this.log(`[Codedeck] onRefreshSessions handler error: ${err}`));
           break;
         case 'upload-image':
-          this.events.onUploadImage(
-            msg.sessionId, msg.uploadId, msg.filename, msg.mimeType,
-            msg.base64Data, msg.text, msg.chunkIndex, msg.totalChunks,
-          );
+          this.events.onUploadImage(msg, event.pubkey);
           break;
       }
     } catch (err) {

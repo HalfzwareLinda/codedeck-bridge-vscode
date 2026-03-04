@@ -13,8 +13,10 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import * as crypto from 'crypto';
 import { NostrRelay, NostrRelayEvents } from './nostrRelay';
-import type { OutputEntry, RemoteSessionInfo, PairedPhone } from './types';
+import type { OutputEntry, RemoteSessionInfo, PairedPhone, UploadImageBlossomMessage, UploadImageChunkMessage } from './types';
+import { decrypt, getConversationKey } from 'nostr-tools/nip44';
 
 export interface BridgeCoreConfig {
   secretKey: Uint8Array;
@@ -69,11 +71,13 @@ export class BridgeCore {
   private terminal: TerminalSender;
   private sessionProvider: SessionProvider | null = null;
   private workspaceCwd: string;
+  private secretKey: Uint8Array;
   private imageChunks: Map<string, ImageUploadTracker> = new Map();
 
   constructor(config: BridgeCoreConfig, terminal: TerminalSender, private log: (msg: string) => void = console.log) {
     this.terminal = terminal;
     this.workspaceCwd = config.workspaceCwd ?? '';
+    this.secretKey = config.secretKey;
 
     const relayEvents: NostrRelayEvents = {
       onInput: async (sessionId, text, phonePubkey) => {
@@ -208,8 +212,15 @@ export class BridgeCore {
         this.log(`[Codedeck] Re-publishing ${sessions.length} sessions (after rescan)`);
         this.onSessionListChanged(sessions);
       },
-      onUploadImage: (sessionId, uploadId, filename, mimeType, base64Data, text, chunkIndex, totalChunks) => {
-        this.handleImageChunk(sessionId, uploadId, filename, mimeType, base64Data, text, chunkIndex, totalChunks);
+      onUploadImage: (msg, phonePubkey) => {
+        if ('hash' in msg) {
+          // Blossom path: download encrypted blob, decrypt, write to disk
+          this.handleBlossomImage(msg as UploadImageBlossomMessage, phonePubkey);
+        } else {
+          // Legacy chunk path
+          const chunk = msg as UploadImageChunkMessage;
+          this.handleImageChunk(chunk.sessionId, chunk.uploadId, chunk.filename, chunk.mimeType, chunk.base64Data, chunk.text, chunk.chunkIndex, chunk.totalChunks);
+        }
       },
     };
 
@@ -355,7 +366,63 @@ export class BridgeCore {
     this.relay.disconnect();
   }
 
-  // --- Image upload chunk assembly ---
+  // --- Image upload: Blossom (encrypted blob) ---
+
+  private async handleBlossomImage(msg: UploadImageBlossomMessage, phonePubkey: string): Promise<void> {
+    this.log(`[Codedeck] Blossom image: downloading ${msg.url} (${msg.sizeBytes} bytes)`);
+
+    try {
+      // 1. Download encrypted blob from Blossom server
+      const response = await fetch(msg.url);
+      if (!response.ok) {
+        throw new Error(`Blossom download failed: ${response.status} ${response.statusText}`);
+      }
+      const encryptedBytes = new Uint8Array(await response.arrayBuffer());
+
+      // 2. Verify SHA-256 hash
+      const hashBuffer = crypto.createHash('sha256').update(encryptedBytes).digest();
+      const hashHex = hashBuffer.toString('hex');
+      if (hashHex !== msg.hash) {
+        throw new Error(`Hash mismatch: expected ${msg.hash}, got ${hashHex}`);
+      }
+
+      // 3. NIP-44 decrypt (encrypted string was encoded to bytes for upload)
+      const decoder = new TextDecoder();
+      const encryptedString = decoder.decode(encryptedBytes);
+      const conversationKey = getConversationKey(this.secretKey, phonePubkey);
+      const base64Data = decrypt(encryptedString, conversationKey);
+
+      // 4. Write decrypted image to disk
+      const uploadsDir = path.join(this.workspaceCwd || '.', '.codedeck', 'uploads');
+      fs.mkdirSync(uploadsDir, { recursive: true });
+
+      const safeName = msg.filename.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const ext = msg.mimeType === 'image/png' ? '.png' : '.jpg';
+      const timestamp = Date.now();
+      const hasExt = safeName.toLowerCase().endsWith(ext);
+      const finalName = `${timestamp}-${safeName}${hasExt ? '' : ext}`;
+      const filePath = path.join(uploadsDir, finalName);
+
+      const buffer = Buffer.from(base64Data, 'base64');
+      fs.writeFileSync(filePath, buffer);
+      this.log(`[Codedeck] Blossom image saved: ${filePath} (${buffer.length} bytes)`);
+
+      // 5. Send text to Claude Code terminal referencing the file path
+      const userText = msg.text.trim();
+      const terminalText = userText
+        ? `${userText}\n\n[Attached image: ${filePath} — use the Read tool to view it]`
+        : `Please examine this image: ${filePath}`;
+
+      const sent = await this.terminal.sendText(terminalText, msg.sessionId);
+      if (!sent) {
+        this.terminal.notifyNoTerminal();
+      }
+    } catch (err) {
+      this.log(`[Codedeck] Blossom image download/decrypt failed: ${err}`);
+    }
+  }
+
+  // --- Image upload chunk assembly (legacy) ---
 
   private handleImageChunk(
     sessionId: string, uploadId: string, filename: string, mimeType: string,
