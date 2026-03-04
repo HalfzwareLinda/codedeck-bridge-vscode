@@ -320,7 +320,7 @@ export class TerminalRegistry implements vscode.Disposable {
    * The terminal ↔ sessionId mapping is set deterministically at creation time.
    */
   createSession(sessionId: string, cwd?: string): vscode.Terminal {
-    const command = `claude --session-id ${sessionId} --ide`;
+    const command = `claude --session-id ${sessionId} --ide --permission-mode plan`;
 
     const terminal = vscode.window.createTerminal({
       name: `Claude Code (${sessionId.slice(0, 8)})`,

@@ -137,6 +137,8 @@ export class BridgeCore {
           if (!success) {
             this.log(`[Codedeck] WARNING: session-ready for ${sessionId} failed on all relays after retries`);
           }
+          // Session launched with --permission-mode plan, seed tracked mode to match
+          this.trackedModes.set(sessionId, 'plan');
         } catch (err) {
           this.log(`[Codedeck] Terminal spawn failed for ${sessionId}: ${err}`);
           await this.relay.publishSessionFailed(sessionId, 'terminal-failed');
@@ -237,13 +239,12 @@ export class BridgeCore {
    * when the next JSONL user entry eventually arrives.
    */
   private static readonly MODE_CYCLE = ['default', 'acceptEdits', 'plan', 'bypassPermissions'];
-  private static readonly SHIFT_TAB_DELAY_MS = 250;
+  private static readonly SHIFT_TAB_DELAY_MS = 400;
 
   /** Bridge-side tracked mode per session (authoritative for delta calculation). */
   private trackedModes: Map<string, string> = new Map();
   /** Serialization chain per session — prevents interleaved Shift+Tab sequences. */
   private modeQueue: Map<string, Promise<void>> = new Map();
-
   /**
    * Called when a JSONL user entry reveals the actual permissionMode.
    * If it contradicts trackedModes, update to the observed value (passive drift correction).
@@ -322,6 +323,13 @@ export class BridgeCore {
 
   /** Called when session list changes (new/deleted sessions). */
   onSessionListChanged(sessions: RemoteSessionInfo[]): void {
+    // Seed trackedModes for sessions not yet tracked (e.g., after extension reload)
+    for (const s of sessions) {
+      if (!this.trackedModes.has(s.id)) {
+        this.trackedModes.set(s.id, s.permissionMode ?? 'default');
+      }
+    }
+
     this.relay.publishSessionList(sessions).catch(err => {
       console.error('[Codedeck] Failed to publish session list:', err);
     });
