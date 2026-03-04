@@ -18,6 +18,10 @@
 - [x] **Dead session pruning** — `pruneDeletedSessions()` checks `fs.existsSync` every ~36s.
 - [x] **Dispose lifecycle** — `dispose()` sets `disposed = true` then `disconnect()` — prevents post-deactivation reconnects.
 
+## Backlog — Mode Tracking
+
+- [ ] **Optimistic mode tracking drifts from actual terminal state** — The Shift+Tab keystroke approach for mode switching is unreliable: Claude Code can change its own mode (e.g. entering plan mode from a prompt) between our Shift+Tab sends and the next observation. The drift recovery (`Mode drift detected ... syncing`) works, but the optimistic tracking is frequently wrong. Investigate reading the actual mode from terminal output or Claude Code's state instead of tracking it optimistically.
+
 ## Low Priority — Relay Hygiene (NIP-40 Expiration)
 
 - [ ] **Add 1-hour expiration to history response events** — `nostrRelay.ts:publishHistory()` — Add `['expiration', ...]` tag to kind 29515 history events (`['t', 'history']`). These are one-shot catch-up payloads, pure waste after delivery. Easiest win.
