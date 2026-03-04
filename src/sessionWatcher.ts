@@ -12,7 +12,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { parseJsonlLine, extractSessionMeta, extractFirstUserMessage, resolveProjectFromCwd, extractPermissionMode, toolNeedsPermission } from './jsonlParser';
+import { parseJsonlLine, extractSessionMeta, extractFirstUserMessage, resolveProjectFromCwd, extractPermissionMode, toolNeedsPermission, shouldAutoApproveInPlanMode } from './jsonlParser';
 import type { OutputEntry, RemoteSessionInfo } from './types';
 
 const MAX_HISTORY_PER_SESSION = 500;
@@ -27,6 +27,8 @@ export interface SessionWatcherEvents {
   onExistingSession?: (sessionId: string, cwd: string) => void;
   /** Fired when a JSONL user entry reveals the session's actual permissionMode. */
   onPermissionModeChanged?: (sessionId: string, mode: string) => void;
+  /** Fired when a tool permission should be auto-approved (e.g. read-only tools in plan mode). */
+  onAutoApprovePermission?: (sessionId: string, toolUseId: string, toolName: string) => void;
 }
 
 export class SessionWatcher implements vscode.Disposable {
@@ -145,7 +147,8 @@ export class SessionWatcher implements vscode.Disposable {
         }
       }
 
-      const withPermissions = this.injectPermissionRequests(allParsed, resolved);
+      const currentModeForHistory = this.permissionModes.get(sessionId) ?? 'default';
+      const withPermissions = this.injectPermissionRequests(allParsed, resolved, sessionId, currentModeForHistory);
       for (const entry of withPermissions) {
         seq++;
         entries.push({ seq, entry });
@@ -428,7 +431,8 @@ export class SessionWatcher implements vscode.Disposable {
       // Pass 2: inject permission_request entries. injectPermissionRequests() does
       // its own same-batch detection: if a tool_use and its tool_result are both
       // in this batch, the tool was auto-approved and no card is injected.
-      const withPermissions = this.injectPermissionRequests(batchEntries, resolved);
+      const currentMode = this.permissionModes.get(meta.sessionId) ?? 'default';
+      const withPermissions = this.injectPermissionRequests(batchEntries, resolved, meta.sessionId, currentMode);
 
       // NOW update resolvedToolIds with this batch's tool_results (for future batches)
       for (const entry of batchEntries) {
@@ -533,10 +537,15 @@ export class SessionWatcher implements vscode.Disposable {
    * `resolvedIds` contains tool_use_ids from previous batches that already
    * have a matching tool_result — these are completed and should not
    * generate a permission card on the phone.
+   *
+   * In plan mode, read-only tools are auto-approved by firing
+   * `onAutoApprovePermission` instead of injecting a permission card.
    */
   private injectPermissionRequests(
     entries: OutputEntry[],
     resolvedIds: Set<string> = new Set(),
+    sessionId?: string,
+    permissionMode?: string,
   ): OutputEntry[] {
     // Pre-scan: collect tool_use_ids that have a tool_result in THIS batch.
     // If both arrive in the same 2s poll window, the tool was auto-approved.
@@ -557,6 +566,13 @@ export class SessionWatcher implements vscode.Disposable {
         if (toolName && toolNeedsPermission(toolName)
             && !resolvedIds.has(toolUseId)
             && !batchResolvedIds.has(toolUseId)) {
+          // In plan mode, auto-approve read-only tools instead of prompting
+          if (permissionMode === 'plan' && shouldAutoApproveInPlanMode(toolName) && sessionId) {
+            console.log(`[Codedeck] Auto-approving ${toolName} in plan mode (id=${toolUseId})`);
+            this.events.onAutoApprovePermission?.(sessionId, toolUseId, toolName);
+            // Don't inject permission_request — phone won't see the prompt
+            continue;
+          }
           console.log(`[Codedeck] Injected permission_request for ${toolName} (id=${toolUseId})`);
           result.push({
             entryType: 'system',

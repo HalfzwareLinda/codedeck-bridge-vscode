@@ -145,6 +145,10 @@ export function activate(context: vscode.ExtensionContext): void {
     onPermissionModeChanged: (sessionId, mode) => {
       bridgeCore?.onPermissionModeObserved(sessionId, mode);
     },
+    onAutoApprovePermission: (sessionId, _toolUseId, toolName) => {
+      log(`[Codedeck] Auto-approving ${toolName} in plan mode for ${sessionId}`);
+      terminalRegistry.sendKeypress('1', sessionId);
+    },
   }, workspaceCwd);
   context.subscriptions.push(sessionWatcher);
   sessionWatcher.start();

@@ -37,6 +37,16 @@ export function extractPermissionMode(line: string): string | undefined {
   return undefined;
 }
 
+/** Tools that are safe to auto-approve when in plan mode.
+ *  Plan mode restricts Claude to read-only tools at the model level,
+ *  so any tool it invokes during planning is safe to approve automatically.
+ *  This lets the planning phase run uninterrupted without prompting the user. */
+const PLAN_MODE_AUTO_APPROVE = new Set([
+  'Read', 'Glob', 'Grep', 'Agent', 'WebSearch', 'WebFetch',
+  'AskUserQuestion', 'EnterPlanMode', 'Skill',
+  'TaskCreate', 'TaskUpdate', 'TaskList', 'TaskGet', 'TaskOutput',
+]);
+
 /** Check whether a tool might show a permission prompt.
  *  Uses a small denylist of truly internal tools. Everything else (including
  *  Read/Glob/Grep) is assumed to potentially prompt — the bridge's same-batch
@@ -44,6 +54,11 @@ export function extractPermissionMode(line: string): string | undefined {
  *  tools without Nostr overhead. */
 export function toolNeedsPermission(toolName: string, _permissionMode?: string): boolean {
   return !NEVER_NEEDS_PERMISSION.has(toolName);
+}
+
+/** Check whether a tool should be auto-approved when the session is in plan mode. */
+export function shouldAutoApproveInPlanMode(toolName: string): boolean {
+  return PLAN_MODE_AUTO_APPROVE.has(toolName);
 }
 
 /**
