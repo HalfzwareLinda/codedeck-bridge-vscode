@@ -107,6 +107,13 @@ export interface RefreshSessionsMessage {
   type: 'refresh-sessions';
 }
 
+// --- Close session (phone → bridge) ---
+
+export interface CloseSessionMessage {
+  type: 'close-session';
+  sessionId: string;
+}
+
 // --- Image upload (phone → bridge) ---
 
 /** Legacy chunked upload (pre-Blossom) */
@@ -165,10 +172,18 @@ export interface InputFailedMessage {
   reason: 'no-terminal' | 'expired';
 }
 
+// --- Close session acknowledgment (bridge → phone) ---
+
+export interface CloseSessionAckMessage {
+  type: 'close-session-ack';
+  sessionId: string;
+  success: boolean;
+}
+
 // --- Union ---
 
-export type BridgeOutbound = SessionListMessage | OutputMessage | HistoryResponseMessage | SessionPendingMessage | SessionReadyMessage | SessionFailedMessage | InputFailedMessage;
-export type BridgeInbound = InputMessage | PermissionResponseMessage | KeypressMessage | ModeChangeMessage | HistoryRequestMessage | CreateSessionMessage | RefreshSessionsMessage | UploadImageMessage;
+export type BridgeOutbound = SessionListMessage | OutputMessage | HistoryResponseMessage | SessionPendingMessage | SessionReadyMessage | SessionFailedMessage | InputFailedMessage | CloseSessionAckMessage;
+export type BridgeInbound = InputMessage | PermissionResponseMessage | KeypressMessage | ModeChangeMessage | HistoryRequestMessage | CreateSessionMessage | RefreshSessionsMessage | CloseSessionMessage | UploadImageMessage;
 export type BridgeMessage = BridgeOutbound | BridgeInbound;
 
 // --- Nostr event kinds ---

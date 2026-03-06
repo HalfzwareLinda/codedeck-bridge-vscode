@@ -183,6 +183,20 @@ export class TerminalRegistry implements vscode.Disposable {
     }
   }
 
+  /**
+   * Close (dispose) the terminal for a session, removing the mapping.
+   * Returns true if a terminal was found and closed.
+   */
+  closeSession(sessionId: string): boolean {
+    const terminal = this.sessionTerminals.get(sessionId);
+    if (!terminal) return false;
+    this.sessionTerminals.delete(sessionId);
+    if (terminal.exitStatus === undefined) {
+      terminal.dispose();
+    }
+    return true;
+  }
+
   /** Check if a session has a live (non-exited) terminal mapping. */
   hasTerminal(sessionId: string): boolean {
     const terminal = this.sessionTerminals.get(sessionId);

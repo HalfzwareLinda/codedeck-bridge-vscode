@@ -37,6 +37,8 @@ export interface TerminalSender {
   createSession: (sessionId: string, cwd?: string) => void;
   /** Queue input for a session that was just relaunched (delayed delivery). */
   queueInputForRelaunch: (sessionId: string, text: string) => void;
+  /** Close (dispose) the terminal for a session. Returns true if found and closed. */
+  closeSession: (sessionId: string) => boolean;
   notifyNoTerminal: () => void;
 }
 
@@ -211,6 +213,18 @@ export class BridgeCore {
         const sessions = this.sessionProvider.getSessions();
         this.log(`[Codedeck] Re-publishing ${sessions.length} sessions (after rescan)`);
         this.onSessionListChanged(sessions);
+      },
+      onCloseSession: async (sessionId) => {
+        this.log(`[Codedeck] Close session request for ${sessionId}`);
+        const found = this.terminal.closeSession(sessionId);
+        // Re-publish session list excluding the closed session
+        const sessions = (this.sessionProvider?.getSessions() ?? [])
+          .filter(s => s.id !== sessionId);
+        this.onSessionListChanged(sessions);
+        // Send ack so the phone knows whether the terminal was actually closed
+        this.relay.publishCloseSessionAck(sessionId, found).catch(err => {
+          console.error('[Codedeck] Failed to publish close-session-ack:', err);
+        });
       },
       onUploadImage: (msg, phonePubkey) => {
         if ('hash' in msg) {

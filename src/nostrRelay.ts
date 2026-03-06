@@ -37,6 +37,7 @@ export interface NostrRelayEvents {
   onHistoryRequest: (sessionId: string, afterSeq: number | undefined, phonePubkey: string) => void;
   onCreateSession: () => void;
   onRefreshSessions: () => void;
+  onCloseSession: (sessionId: string) => void;
   onUploadImage: (msg: import('./types').UploadImageMessage, phonePubkey: string) => void;
 }
 
@@ -600,6 +601,17 @@ export class NostrRelay {
     return this.publishToAllPhones(msg, 60);
   }
 
+  /** Publish close-session acknowledgment (NIP-40: expires in 60s). */
+  async publishCloseSessionAck(sessionId: string, success: boolean): Promise<boolean> {
+    const msg: import('./types').CloseSessionAckMessage = {
+      type: 'close-session-ack',
+      sessionId,
+      success,
+    };
+    this.log(`[Codedeck] Publishing close-session-ack: session=${sessionId}, success=${success}`);
+    return this.publishToAllPhones(msg, 60);
+  }
+
   /** Publish input-failed feedback when input can't be routed to a terminal (NIP-40: expires in 60s). */
   async publishInputFailed(sessionId: string, reason: 'no-terminal' | 'expired'): Promise<boolean> {
     const msg: InputFailedMessage = {
@@ -782,6 +794,10 @@ export class NostrRelay {
         case 'refresh-sessions':
           Promise.resolve(this.events.onRefreshSessions())
             .catch(err => this.log(`[Codedeck] onRefreshSessions handler error: ${err}`));
+          break;
+        case 'close-session':
+          Promise.resolve(this.events.onCloseSession(msg.sessionId))
+            .catch(err => this.log(`[Codedeck] onCloseSession handler error: ${err}`));
           break;
         case 'upload-image':
           this.events.onUploadImage(msg, event.pubkey);

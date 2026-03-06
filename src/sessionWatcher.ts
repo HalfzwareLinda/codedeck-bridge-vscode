@@ -861,9 +861,20 @@ export class SessionWatcher implements vscode.Disposable {
         // File gone
       }
     }
+    // Deduplicate by sessionId — multiple JSONL files can share the same sessionId
+    // (e.g. when Claude Code resumes a session). Keep the most recently modified file.
+    const deduped = new Map<string, RemoteSessionInfo>();
+    for (const s of sessions) {
+      const existing = deduped.get(s.id);
+      if (!existing || s.lastActivity > existing.lastActivity) {
+        deduped.set(s.id, s);
+      }
+    }
+    const unique = [...deduped.values()];
+
     // Sort by last activity, most recent first — cap to avoid oversized Nostr events
-    sessions.sort((a, b) => b.lastActivity.localeCompare(a.lastActivity));
-    return sessions.slice(0, MAX_SESSIONS);
+    unique.sort((a, b) => b.lastActivity.localeCompare(a.lastActivity));
+    return unique.slice(0, MAX_SESSIONS);
   }
 
   /** Get the current permission mode for a session (from JSONL parsing). */

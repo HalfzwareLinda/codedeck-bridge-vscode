@@ -95,6 +95,10 @@ export function activate(context: vscode.ExtensionContext): void {
         log(`[Codedeck] Claude Code terminal spawned for ${sessionId}`);
       },
       queueInputForRelaunch: (sessionId, text) => terminalRegistry.queueInputForRelaunch(sessionId, text),
+      closeSession: (sessionId) => {
+        log(`[Codedeck] Closing terminal for session ${sessionId}`);
+        return terminalRegistry.closeSession(sessionId);
+      },
       notifyNoTerminal,
     },
     log,
