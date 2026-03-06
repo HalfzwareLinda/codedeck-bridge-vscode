@@ -21,6 +21,8 @@ Bridges Claude Code sessions running in VSCode to the [Codedeck](https://github.
 - **Question forwarding**: AskUserQuestion tool calls forwarded as multi-choice question cards
 - **Image upload relay**: Reassembles chunked image uploads from the phone and writes to `.codedeck/uploads/`
 - **Remote session creation**: Start new Claude Code terminals from the phone with direct `claude --session-id` spawning
+- **Close remote sessions**: Phone can request terminal closure; bridge disposes terminal and sends acknowledgment
+- **Session deduplication**: Multiple JSONL files sharing a session ID are deduplicated (keeps most recent)
 - **Session title back-fill**: Extracts first user message for sessions with missing titles
 - History catch-up on reconnect with sequence-based gap detection
 - **Mode switching**: Runtime permission mode cycling (default/plan/acceptEdits/bypassPermissions) via Shift+Tab

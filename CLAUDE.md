@@ -41,7 +41,7 @@ Phone (Codedeck) → NostrRelay → TerminalBridge → Claude Code terminal (sen
 | Output stream | 29515 (regular) | `['p', phonePubkey]`, `['s', sessionId]`, `['seq', N]` |
 | History response | 29515 (regular) | `['p', phonePubkey]`, `['s', sessionId]`, `['t', 'history']` |
 
-All content NIP-44 encrypted. Messages: `sessions`, `output`, `history`, `input`, `permission-res`, `mode`, `history-request`.
+All content NIP-44 encrypted. Messages: `sessions`, `output`, `history`, `input`, `permission-res`, `mode`, `history-request`, `close-session`, `close-session-ack`.
 
 ### VSCode Commands
 
@@ -51,7 +51,7 @@ All content NIP-44 encrypted. Messages: `sessions`, `output`, `history`, `input`
 
 ### Extension Settings
 
-- `codedeck.relays` — Nostr relay URLs (default: `wss://relay.damus.io`, `wss://nos.lol`)
+- `codedeck.relays` — Nostr relay URLs (default: `wss://relay.primal.net`, `wss://relay.nostr.band`, `wss://nos.lol`)
 - `codedeck.machineName` — Display name for this machine (defaults to hostname)
 
 ## Build Notes
