@@ -185,6 +185,16 @@ export class BridgeCore {
       },
       onModeChange: (sessionId, mode) => {
         this.log(`[Codedeck] Mode change for session ${sessionId}: ${mode}`);
+        if (mode === 'bypassPermissions') {
+          this.bypassSessions.add(sessionId);
+          this.log(`[Codedeck] Bypass mode enabled for ${sessionId} (auto-approve all)`);
+          // Cycle terminal to 'default' — bypass uses default's position + auto-approve
+          this.applyModeChange(sessionId, 'default').catch(err => {
+            console.error('[Codedeck] Mode change failed:', err);
+          });
+          return;
+        }
+        this.bypassSessions.delete(sessionId);
         this.applyModeChange(sessionId, mode).catch(err => {
           console.error('[Codedeck] Mode change failed:', err);
         });
@@ -216,6 +226,9 @@ export class BridgeCore {
       },
       onCloseSession: async (sessionId) => {
         this.log(`[Codedeck] Close session request for ${sessionId}`);
+        this.bypassSessions.delete(sessionId);
+        this.trackedModes.delete(sessionId);
+        this.modeQueue.delete(sessionId);
         const found = this.terminal.closeSession(sessionId);
         // Re-publish session list excluding the closed session
         const sessions = (this.sessionProvider?.getSessions() ?? [])
@@ -256,20 +269,31 @@ export class BridgeCore {
 
   /**
    * Mode cycling via Shift+Tab keypresses.
-   * Claude Code cycles: default → acceptEdits → plan (→ bypassPermissions if enabled).
+   * Claude Code's actual Shift+Tab cycle: plan → default → acceptEdits (3 modes).
+   *
+   * Phone cycle: PLAN → BYPASS → EDITS.
+   * BYPASS maps to terminal 'default' + bridge auto-approves all permission prompts.
    *
    * Uses optimistic tracking instead of JSONL verification because Claude Code
    * only writes permissionMode to JSONL on user entries (not on mode changes).
    * Passive drift correction via onPermissionModeObserved() catches mismatches
    * when the next JSONL user entry eventually arrives.
    */
-  private static readonly MODE_CYCLE = ['default', 'acceptEdits', 'plan', 'bypassPermissions'];
+  private static readonly MODE_CYCLE = ['plan', 'default', 'acceptEdits'];
   private static readonly SHIFT_TAB_DELAY_MS = 400;
 
   /** Bridge-side tracked mode per session (authoritative for delta calculation). */
   private trackedModes: Map<string, string> = new Map();
   /** Serialization chain per session — prevents interleaved Shift+Tab sequences. */
   private modeQueue: Map<string, Promise<void>> = new Map();
+  /** Sessions where the phone has requested bypass — bridge auto-approves all permission prompts. */
+  private bypassSessions: Set<string> = new Set();
+
+  /** Check if a session is in phone-side bypass mode (auto-approve all). */
+  isBypassSession(sessionId: string): boolean {
+    return this.bypassSessions.has(sessionId);
+  }
+
   /**
    * Called when a JSONL user entry reveals the actual permissionMode.
    * If it contradicts trackedModes, update to the observed value (passive drift correction).
@@ -279,6 +303,9 @@ export class BridgeCore {
     if (tracked !== undefined && tracked !== observedMode) {
       this.log(`[Codedeck] Mode drift detected for ${sessionId}: tracked=${tracked}, observed=${observedMode} — syncing`);
       this.trackedModes.set(sessionId, observedMode);
+      // Re-publish session list so phone picks up corrected mode
+      const sessions = this.sessionProvider?.getSessions() ?? [];
+      this.onSessionListChanged(sessions);
     } else if (tracked === undefined) {
       // First observation — seed the tracked state
       this.trackedModes.set(sessionId, observedMode);

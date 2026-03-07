@@ -27,8 +27,10 @@ export interface SessionWatcherEvents {
   onExistingSession?: (sessionId: string, cwd: string) => void;
   /** Fired when a JSONL user entry reveals the session's actual permissionMode. */
   onPermissionModeChanged?: (sessionId: string, mode: string) => void;
-  /** Fired when a tool permission should be auto-approved (e.g. read-only tools in plan mode). */
+  /** Fired when a tool permission should be auto-approved (e.g. read-only tools in plan mode, or bypass mode). */
   onAutoApprovePermission?: (sessionId: string, toolUseId: string, toolName: string) => void;
+  /** Check if a session is in phone-side bypass mode (auto-approve all permission prompts). */
+  isBypassSession?: (sessionId: string) => boolean;
 }
 
 export class SessionWatcher implements vscode.Disposable {
@@ -566,6 +568,12 @@ export class SessionWatcher implements vscode.Disposable {
         if (toolName && toolNeedsPermission(toolName)
             && !resolvedIds.has(toolUseId)
             && !batchResolvedIds.has(toolUseId)) {
+          // In bypass mode, auto-approve ALL tools
+          if (sessionId && this.events.isBypassSession?.(sessionId)) {
+            console.log(`[Codedeck] Auto-approving ${toolName} in bypass mode (id=${toolUseId})`);
+            this.events.onAutoApprovePermission?.(sessionId, toolUseId, toolName);
+            continue;
+          }
           // In plan mode, auto-approve read-only tools instead of prompting
           if (permissionMode === 'plan' && shouldAutoApproveInPlanMode(toolName) && sessionId) {
             console.log(`[Codedeck] Auto-approving ${toolName} in plan mode (id=${toolUseId})`);
