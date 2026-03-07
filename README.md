@@ -25,7 +25,7 @@ Bridges Claude Code sessions running in VSCode to the [Codedeck](https://github.
 - **Session deduplication**: Multiple JSONL files sharing a session ID are deduplicated (keeps most recent)
 - **Session title back-fill**: Extracts first user message for sessions with missing titles
 - History catch-up on reconnect with sequence-based gap detection
-- **Mode switching**: Runtime permission mode cycling (default/plan/acceptEdits/bypassPermissions) via Shift+Tab
+- **Mode switching**: Runtime permission mode cycling (plan/bypass/acceptEdits) via Shift+Tab, with auto-approve in bypass mode
 - **Reliability**: Exponential backoff reconnection, TOCTOU-safe file reads, terminal liveness checks, memory-bounded history buffers
 - Relay rate-limit resilience for session-ready events
 - Status bar indicator showing connection state
