@@ -185,19 +185,25 @@ export class BridgeCore {
       },
       onModeChange: (sessionId, mode) => {
         this.log(`[Codedeck] Mode change for session ${sessionId}: ${mode}`);
-        if (mode === 'bypassPermissions') {
-          this.bypassSessions.add(sessionId);
-          this.log(`[Codedeck] Bypass mode enabled for ${sessionId} (auto-approve all)`);
-          // Cycle terminal to 'default' — bypass uses default's position + auto-approve
-          this.applyModeChange(sessionId, 'default').catch(err => {
+        // Debounce per session — collapses rapid-fire mode requests into one
+        const pending = this.modeDebounce.get(sessionId);
+        if (pending) { clearTimeout(pending); }
+        this.modeDebounce.set(sessionId, setTimeout(() => {
+          this.modeDebounce.delete(sessionId);
+          if (mode === 'bypassPermissions') {
+            this.bypassSessions.add(sessionId);
+            this.log(`[Codedeck] Bypass mode enabled for ${sessionId} (auto-approve all)`);
+            // Cycle terminal to 'default' — bypass uses default's position + auto-approve
+            this.applyModeChange(sessionId, 'default').catch(err => {
+              console.error('[Codedeck] Mode change failed:', err);
+            });
+            return;
+          }
+          this.bypassSessions.delete(sessionId);
+          this.applyModeChange(sessionId, mode).catch(err => {
             console.error('[Codedeck] Mode change failed:', err);
           });
-          return;
-        }
-        this.bypassSessions.delete(sessionId);
-        this.applyModeChange(sessionId, mode).catch(err => {
-          console.error('[Codedeck] Mode change failed:', err);
-        });
+        }, 300));
       },
       onHistoryRequest: (sessionId, afterSeq, phonePubkey) => {
         console.log(`[Codedeck] History request for ${sessionId} (afterSeq: ${afterSeq})`);
@@ -288,6 +294,10 @@ export class BridgeCore {
   private modeQueue: Map<string, Promise<void>> = new Map();
   /** Sessions where the phone has requested bypass — bridge auto-approves all permission prompts. */
   private bypassSessions: Set<string> = new Set();
+  /** Per-session debounce timer for incoming mode changes (collapses rapid-fire requests). */
+  private modeDebounce: Map<string, ReturnType<typeof setTimeout>> = new Map();
+  /** Per-session AbortController to cancel in-flight Shift+Tab sequences. */
+  private modeAbort: Map<string, AbortController> = new Map();
 
   /** Check if a session is in phone-side bypass mode (auto-approve all). */
   isBypassSession(sessionId: string): boolean {
@@ -303,9 +313,9 @@ export class BridgeCore {
     if (tracked !== undefined && tracked !== observedMode) {
       this.log(`[Codedeck] Mode drift detected for ${sessionId}: tracked=${tracked}, observed=${observedMode} — syncing`);
       this.trackedModes.set(sessionId, observedMode);
-      // Re-publish session list so phone picks up corrected mode
-      const sessions = this.sessionProvider?.getSessions() ?? [];
-      this.onSessionListChanged(sessions);
+      // Passive correction only — the next natural session list publish will
+      // include the corrected mode. Eagerly re-publishing here caused a
+      // feedback loop with phone-side mode reconciliation (issue: session duplication).
     } else if (tracked === undefined) {
       // First observation — seed the tracked state
       this.trackedModes.set(sessionId, observedMode);
@@ -313,16 +323,24 @@ export class BridgeCore {
   }
 
   private async applyModeChange(sessionId: string, targetMode: string): Promise<void> {
+    // Abort any in-flight mode switch for this session
+    this.modeAbort.get(sessionId)?.abort();
+    const ac = new AbortController();
+    this.modeAbort.set(sessionId, ac);
+
     // Serialize per session: chain onto existing queue
     const prev = this.modeQueue.get(sessionId) ?? Promise.resolve();
-    const next = prev.then(() => this.doModeSwitch(sessionId, targetMode)).catch(err => {
+    const next = prev.then(() => {
+      if (ac.signal.aborted) { return; }
+      return this.doModeSwitch(sessionId, targetMode, ac.signal);
+    }).catch(err => {
       this.log(`[Codedeck] Mode switch error for ${sessionId}: ${err}`);
     });
     this.modeQueue.set(sessionId, next);
     await next;
   }
 
-  private async doModeSwitch(sessionId: string, targetMode: string): Promise<void> {
+  private async doModeSwitch(sessionId: string, targetMode: string, signal?: AbortSignal): Promise<void> {
     // Seed tracked mode from JSONL if we haven't tracked this session yet
     if (!this.trackedModes.has(sessionId)) {
       const jsonlMode = this.sessionProvider?.getPermissionMode?.(sessionId);
@@ -335,7 +353,8 @@ export class BridgeCore {
       return;
     }
 
-    const sent = await this.sendShiftTabs(sessionId, currentTracked, targetMode);
+    if (signal?.aborted) { return; }
+    const sent = await this.sendShiftTabs(sessionId, currentTracked, targetMode, signal);
     if (sent) {
       this.trackedModes.set(sessionId, targetMode);
       this.log(`[Codedeck] Mode optimistically tracked as ${targetMode} for ${sessionId}`);
@@ -343,7 +362,7 @@ export class BridgeCore {
   }
 
   /** Send the calculated number of Shift+Tab presses to go from fromMode to toMode. */
-  private async sendShiftTabs(sessionId: string, fromMode: string, toMode: string): Promise<boolean> {
+  private async sendShiftTabs(sessionId: string, fromMode: string, toMode: string, signal?: AbortSignal): Promise<boolean> {
     const cycle = BridgeCore.MODE_CYCLE;
     const fromIndex = Math.max(0, cycle.indexOf(fromMode));
     const toIndex = cycle.indexOf(toMode);
@@ -354,6 +373,10 @@ export class BridgeCore {
     this.log(`[Codedeck] Sending ${steps} Shift+Tab(s) for ${sessionId}: ${fromMode} → ${toMode}`);
 
     for (let i = 0; i < steps; i++) {
+      if (signal?.aborted) {
+        this.log(`[Codedeck] Mode switch aborted for ${sessionId} at step ${i + 1}/${steps}`);
+        return false;
+      }
       const sent = await this.terminal.sendShiftTab(sessionId);
       if (!sent) {
         this.log(`[Codedeck] Failed to send Shift+Tab for ${sessionId} (step ${i + 1}/${steps})`);
