@@ -16,7 +16,6 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { NostrRelay, NostrRelayEvents } from './nostrRelay';
 import type { OutputEntry, RemoteSessionInfo, PairedPhone, UploadImageBlossomMessage, UploadImageChunkMessage } from './types';
-import { decrypt, getConversationKey } from 'nostr-tools/nip44';
 
 export interface BridgeCoreConfig {
   secretKey: Uint8Array;
@@ -248,7 +247,7 @@ export class BridgeCore {
       onUploadImage: (msg, phonePubkey) => {
         if ('hash' in msg) {
           // Blossom path: download encrypted blob, decrypt, write to disk
-          this.handleBlossomImage(msg as UploadImageBlossomMessage, phonePubkey);
+          this.handleBlossomImage(msg as UploadImageBlossomMessage);
         } else {
           // Legacy chunk path
           const chunk = msg as UploadImageChunkMessage;
@@ -432,7 +431,7 @@ export class BridgeCore {
 
   // --- Image upload: Blossom (encrypted blob) ---
 
-  private async handleBlossomImage(msg: UploadImageBlossomMessage, phonePubkey: string): Promise<void> {
+  private async handleBlossomImage(msg: UploadImageBlossomMessage): Promise<void> {
     this.log(`[Codedeck] Blossom image: downloading ${msg.url} (${msg.sizeBytes} bytes)`);
 
     try {
@@ -450,11 +449,15 @@ export class BridgeCore {
         throw new Error(`Hash mismatch: expected ${msg.hash}, got ${hashHex}`);
       }
 
-      // 3. NIP-44 decrypt (encrypted string was encoded to bytes for upload)
-      const decoder = new TextDecoder();
-      const encryptedString = decoder.decode(encryptedBytes);
-      const conversationKey = getConversationKey(this.secretKey, phonePubkey);
-      const base64Data = decrypt(encryptedString, conversationKey);
+      // 3. AES-256-GCM decrypt
+      const key = Buffer.from(msg.key, 'hex');
+      const iv = Buffer.from(msg.iv, 'hex');
+      // Web Crypto appends the 16-byte auth tag to the ciphertext
+      const authTag = encryptedBytes.slice(-16);
+      const ciphertext = encryptedBytes.slice(0, -16);
+      const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+      decipher.setAuthTag(authTag);
+      const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
 
       // 4. Write decrypted image to disk
       const uploadsDir = path.join(this.workspaceCwd || '.', '.codedeck', 'uploads');
@@ -467,9 +470,8 @@ export class BridgeCore {
       const finalName = `${timestamp}-${safeName}${hasExt ? '' : ext}`;
       const filePath = path.join(uploadsDir, finalName);
 
-      const buffer = Buffer.from(base64Data, 'base64');
-      fs.writeFileSync(filePath, buffer);
-      this.log(`[Codedeck] Blossom image saved: ${filePath} (${buffer.length} bytes)`);
+      fs.writeFileSync(filePath, decrypted);
+      this.log(`[Codedeck] Blossom image saved: ${filePath} (${decrypted.length} bytes)`);
 
       // 5. Send text to Claude Code terminal referencing the file path
       const userText = msg.text.trim();

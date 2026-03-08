@@ -129,12 +129,14 @@ export interface UploadImageChunkMessage {
   totalChunks: number;
 }
 
-/** Blossom upload — single event with hash reference to encrypted blob */
+/** Blossom upload — single event with hash reference to AES-256-GCM encrypted blob */
 export interface UploadImageBlossomMessage {
   type: 'upload-image';
   sessionId: string;
   hash: string;
   url: string;
+  key: string;
+  iv: string;
   filename: string;
   mimeType: string;
   text: string;
