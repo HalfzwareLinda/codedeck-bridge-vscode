@@ -194,15 +194,34 @@ export class BridgeCore {
         this.log(`[Codedeck] Keypress for session ${sessionId}: ${key}`);
         this.lastKeypressTime.set(sessionId, Date.now());
 
-        // Track plan option 1 ("Clear context & auto-accept") — Claude Code will
-        // spawn a new session with a new ID. Record the old session so onNewSession
-        // can detect the replacement and notify the phone.
-        if (key === '1' && this.trackedModes.get(sessionId) === 'plan') {
-          const sessions = this.sessionProvider?.getSessions() ?? [];
-          const session = sessions.find(s => s.id === sessionId);
-          const cwd = session?.cwd || this.workspaceCwd;
-          this.pendingReplacements.set(sessionId, { cwd, timestamp: Date.now() });
-          this.log(`[Codedeck] Plan option 1 detected — tracking ${sessionId} for replacement`);
+        // Update tracked mode based on plan approval choices.
+        // Claude Code exits plan mode immediately on approval, but the JSONL
+        // permissionMode field only appears on the next user entry. Without
+        // preemptive tracking, subsequent mode switches calculate wrong Shift+Tab deltas.
+        if (this.trackedModes.get(sessionId) === 'plan') {
+          switch (key) {
+            case '1': {
+              // Clear context & auto-accept → new session spawns with acceptEdits
+              this.trackedModes.set(sessionId, 'acceptEdits');
+              const sessions = this.sessionProvider?.getSessions() ?? [];
+              const session = sessions.find(s => s.id === sessionId);
+              const cwd = session?.cwd || this.workspaceCwd;
+              this.pendingReplacements.set(sessionId, { cwd, timestamp: Date.now() });
+              this.log(`[Codedeck] Plan option 1 detected — tracking ${sessionId} for replacement`);
+              break;
+            }
+            case '2':
+              // Approve (auto-accept edits)
+              this.trackedModes.set(sessionId, 'acceptEdits');
+              this.log(`[Codedeck] Plan option 2 — tracked mode → acceptEdits for ${sessionId}`);
+              break;
+            case '3':
+              // Approve (manual edits)
+              this.trackedModes.set(sessionId, 'default');
+              this.log(`[Codedeck] Plan option 3 — tracked mode → default for ${sessionId}`);
+              break;
+            // case '4': revise plan — stays in plan mode, no change
+          }
         }
 
         const sent = await this.terminal.sendKeypress(key, sessionId);
