@@ -74,6 +74,8 @@ export class BridgeCore {
   private workspaceCwd: string;
   private secretKey: Uint8Array;
   private imageChunks: Map<string, ImageUploadTracker> = new Map();
+  /** Timestamp of the last keypress sent to each session (for post-keypress input delay). */
+  private lastKeypressTime: Map<string, number> = new Map();
 
   constructor(config: BridgeCoreConfig, terminal: TerminalSender, private log: (msg: string) => void = console.log) {
     this.terminal = terminal;
@@ -83,6 +85,22 @@ export class BridgeCore {
     const relayEvents: NostrRelayEvents = {
       onInput: async (sessionId, text, phonePubkey) => {
         this.log(`[Codedeck] Input for session ${sessionId}: ${text.slice(0, 50)}...`);
+
+        // If a keypress was sent recently (e.g. plan revision option '4'),
+        // delay input delivery so Claude has time to return to the input prompt.
+        // Without this delay, submitToTerminal types text while Claude is still
+        // processing the keypress, and the text gets lost.
+        const lastKp = this.lastKeypressTime.get(sessionId);
+        if (lastKp && Date.now() - lastKp < 5000) {
+          const elapsed = Date.now() - lastKp;
+          const wait = Math.max(2000 - elapsed, 0);
+          if (wait > 0) {
+            this.log(`[Codedeck] Delaying input by ${wait}ms (keypress ${elapsed}ms ago)`);
+            await new Promise(r => setTimeout(r, wait));
+          }
+          this.lastKeypressTime.delete(sessionId);
+        }
+
         const sent = await this.terminal.sendText(text, sessionId);
         if (!sent) {
           // Try to auto-relaunch the session's terminal before giving up
@@ -174,6 +192,7 @@ export class BridgeCore {
       },
       onKeypress: async (sessionId, key) => {
         this.log(`[Codedeck] Keypress for session ${sessionId}: ${key}`);
+        this.lastKeypressTime.set(sessionId, Date.now());
 
         // Track plan option 1 ("Clear context & auto-accept") — Claude Code will
         // spawn a new session with a new ID. Record the old session so onNewSession
