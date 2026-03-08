@@ -612,6 +612,17 @@ export class NostrRelay {
     return this.publishToAllPhones(msg, 60);
   }
 
+  /** Publish session-replaced notification when plan option 1 creates a new session (NIP-40: expires in 60s). */
+  async publishSessionReplaced(oldSessionId: string, newSession: RemoteSessionInfo): Promise<boolean> {
+    const msg: BridgeOutbound = {
+      type: 'session-replaced',
+      oldSessionId,
+      newSession,
+    };
+    this.log(`[Codedeck] Publishing session-replaced: ${oldSessionId} → ${newSession.id}`);
+    return this.publishToAllPhones(msg, 60, 2);
+  }
+
   /** Publish input-failed feedback when input can't be routed to a terminal (NIP-40: expires in 60s). */
   async publishInputFailed(sessionId: string, reason: 'no-terminal' | 'expired'): Promise<boolean> {
     const msg: InputFailedMessage = {

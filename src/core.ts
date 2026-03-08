@@ -174,6 +174,18 @@ export class BridgeCore {
       },
       onKeypress: async (sessionId, key) => {
         this.log(`[Codedeck] Keypress for session ${sessionId}: ${key}`);
+
+        // Track plan option 1 ("Clear context & auto-accept") — Claude Code will
+        // spawn a new session with a new ID. Record the old session so onNewSession
+        // can detect the replacement and notify the phone.
+        if (key === '1' && this.trackedModes.get(sessionId) === 'plan') {
+          const sessions = this.sessionProvider?.getSessions() ?? [];
+          const session = sessions.find(s => s.id === sessionId);
+          const cwd = session?.cwd || this.workspaceCwd;
+          this.pendingReplacements.set(sessionId, { cwd, timestamp: Date.now() });
+          this.log(`[Codedeck] Plan option 1 detected — tracking ${sessionId} for replacement`);
+        }
+
         const sent = await this.terminal.sendKeypress(key, sessionId);
         if (!sent) {
           this.log(`[Codedeck] WARNING: Failed to deliver keypress '${key}' to terminal for ${sessionId}`);
@@ -297,6 +309,8 @@ export class BridgeCore {
   private modeDebounce: Map<string, ReturnType<typeof setTimeout>> = new Map();
   /** Per-session AbortController to cancel in-flight Shift+Tab sequences. */
   private modeAbort: Map<string, AbortController> = new Map();
+  /** Sessions expecting a replacement after plan option 1 ("clear context & auto-accept"). */
+  private pendingReplacements: Map<string, { cwd: string; timestamp: number }> = new Map();
 
   /** Check if a session is in phone-side bypass mode (auto-approve all). */
   isBypassSession(sessionId: string): boolean {
@@ -417,6 +431,38 @@ export class BridgeCore {
   onNewSession(sessionId: string, _cwd: string): void {
     const sessions = this.sessionProvider?.getSessions() ?? [];
     this.onSessionListChanged(sessions);
+
+    // Check if this new session replaces one that was cleared via plan option 1.
+    // Match by cwd and recency (within 15 seconds).
+    const now = Date.now();
+    for (const [oldSessionId, replacement] of this.pendingReplacements) {
+      if (now - replacement.timestamp > 15_000) {
+        this.pendingReplacements.delete(oldSessionId);
+        continue;
+      }
+      if (_cwd === replacement.cwd || _cwd.startsWith(replacement.cwd)) {
+        this.pendingReplacements.delete(oldSessionId);
+        const newSession = sessions.find(s => s.id === sessionId);
+        if (newSession) {
+          this.log(`[Codedeck] Session replaced: ${oldSessionId} → ${sessionId}`);
+          // Transfer bridge state from old to new session
+          const oldMode = this.trackedModes.get(oldSessionId);
+          if (oldMode) {
+            this.trackedModes.set(sessionId, oldMode);
+            this.trackedModes.delete(oldSessionId);
+          }
+          if (this.bypassSessions.has(oldSessionId)) {
+            this.bypassSessions.add(sessionId);
+            this.bypassSessions.delete(oldSessionId);
+          }
+          // Notify phones so they can swap the session in their UI
+          this.relay.publishSessionReplaced(oldSessionId, newSession).catch(err => {
+            console.error('[Codedeck] Failed to publish session-replaced:', err);
+          });
+        }
+        break;
+      }
+    }
   }
 
   /** Connect to Nostr relays if phones are paired. */
