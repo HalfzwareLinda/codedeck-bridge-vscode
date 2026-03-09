@@ -45,6 +45,7 @@ const PLAN_MODE_AUTO_APPROVE = new Set([
   'Read', 'Glob', 'Grep', 'Agent', 'WebSearch', 'WebFetch',
   'AskUserQuestion', 'EnterPlanMode', 'Skill',
   'TaskCreate', 'TaskUpdate', 'TaskList', 'TaskGet', 'TaskOutput',
+  'Bash', 'Write', 'Edit', 'ExitPlanMode', 'ToolSearch',
 ]);
 
 /** Check whether a tool might show a permission prompt.
