@@ -19,6 +19,93 @@ const MAX_HISTORY_PER_SESSION = 500;
 const MAX_TOTAL_HISTORY_ENTRIES = 10_000;
 /** Sessions with no output in this window are candidates for history eviction. */
 const HISTORY_EVICT_IDLE_MS = 30 * 60 * 1000; // 30 minutes
+/** If an auto-approve keypress hasn't been answered in this time, skip it and try the next. */
+const AUTO_APPROVE_STALE_MS = 30_000;
+
+interface PendingAutoApprove {
+  toolUseId: string;
+  toolName: string;
+  enqueuedAt: number;
+}
+
+/**
+ * Queues auto-approve keypresses per session so they're sent one at a time.
+ *
+ * When multiple tool_use entries appear in the same JSONL batch (parallel tool
+ * calls), sending all keypresses at once causes all but the first to be lost —
+ * Claude Code shows permission prompts sequentially and needs time between them.
+ *
+ * The queue sends the first keypress immediately, then waits for the tool_result
+ * to appear in the JSONL (via the next poll cycle) before sending the next.
+ */
+class AutoApproveQueue {
+  private queues: Map<string, PendingAutoApprove[]> = new Map();
+  /** The toolUseId we sent a keypress for and are waiting to see resolved. */
+  private inflight: Map<string, string> = new Map();
+
+  /**
+   * Add a tool to the queue. Returns `{ immediate: true }` if nothing is
+   * in-flight and the caller should fire the keypress now.
+   */
+  enqueue(sessionId: string, toolUseId: string, toolName: string): { immediate: boolean } {
+    if (!this.inflight.has(sessionId)) {
+      this.inflight.set(sessionId, toolUseId);
+      return { immediate: true };
+    }
+    let q = this.queues.get(sessionId);
+    if (!q) { q = []; this.queues.set(sessionId, q); }
+    q.push({ toolUseId, toolName, enqueuedAt: Date.now() });
+    return { immediate: false };
+  }
+
+  /**
+   * Called after resolvedToolIds is updated. If the in-flight tool is now
+   * resolved, pops the next queued item and returns it (caller fires keypress).
+   */
+  drain(sessionId: string, resolvedIds: Set<string>): PendingAutoApprove | null {
+    const inflightId = this.inflight.get(sessionId);
+    if (!inflightId) { return null; }
+
+    const resolved = resolvedIds.has(inflightId);
+    const stale = !resolved && this.isStale(sessionId);
+
+    if (!resolved && !stale) { return null; }
+
+    if (stale) {
+      console.log(`[Codedeck] Auto-approve stale: ${inflightId} for ${sessionId} — skipping`);
+    }
+
+    // In-flight is done (or stale) — pop next
+    const q = this.queues.get(sessionId);
+    if (!q || q.length === 0) {
+      this.inflight.delete(sessionId);
+      return null;
+    }
+    const next = q.shift()!;
+    if (q.length === 0) { this.queues.delete(sessionId); }
+    this.inflight.set(sessionId, next.toolUseId);
+    return next;
+  }
+
+  private isStale(sessionId: string): boolean {
+    const q = this.queues.get(sessionId);
+    // Check the oldest queued item's timestamp as a proxy
+    if (q && q.length > 0 && Date.now() - q[0].enqueuedAt > AUTO_APPROVE_STALE_MS) {
+      return true;
+    }
+    return false;
+  }
+
+  clear(sessionId: string): void {
+    this.queues.delete(sessionId);
+    this.inflight.delete(sessionId);
+  }
+
+  clearAll(): void {
+    this.queues.clear();
+    this.inflight.clear();
+  }
+}
 
 export interface SessionWatcherEvents {
   onOutput: (sessionId: string, entries: Array<{ seq: number; entry: OutputEntry }>) => void;
@@ -31,6 +118,8 @@ export interface SessionWatcherEvents {
   onAutoApprovePermission?: (sessionId: string, toolUseId: string, toolName: string) => void;
   /** Check if a session is in phone-side bypass mode (auto-approve all permission prompts). */
   isBypassSession?: (sessionId: string) => boolean;
+  /** Get the bridge's authoritative tracked mode (set optimistically on mode change). */
+  getTrackedMode?: (sessionId: string) => string | undefined;
 }
 
 export class SessionWatcher implements vscode.Disposable {
@@ -52,6 +141,7 @@ export class SessionWatcher implements vscode.Disposable {
   private evictInterval: NodeJS.Timeout | null = null;
   /** Guard against concurrent readNewLines for the same file. */
   private readingFiles = new Set<string>();
+  private autoApproveQueue = new AutoApproveQueue();
   private emitDebounceTimer: NodeJS.Timeout | null = null;
   private pollCount = 0;
   private static readonly NEW_FILE_SCAN_EVERY_N_POLLS = 3; // scan for new files every 3rd poll (every 6s)
@@ -149,7 +239,9 @@ export class SessionWatcher implements vscode.Disposable {
         }
       }
 
-      const currentModeForHistory = this.permissionModes.get(sessionId) ?? 'default';
+      const currentModeForHistory = this.events.getTrackedMode?.(sessionId)
+        ?? this.permissionModes.get(sessionId)
+        ?? 'default';
       const withPermissions = this.injectPermissionRequests(allParsed, resolved, sessionId, currentModeForHistory);
       for (const entry of withPermissions) {
         seq++;
@@ -333,6 +425,7 @@ export class SessionWatcher implements vscode.Disposable {
     if (meta) {
       this.sessionHistory.delete(meta.sessionId);
       this.seqCounters.delete(meta.sessionId);
+      this.autoApproveQueue.clear(meta.sessionId);
     }
     this.sessionMeta.delete(filePath);
     this.emitSessionList();
@@ -417,6 +510,11 @@ export class SessionWatcher implements vscode.Disposable {
         if (mode) {
           this.permissionModes.set(meta.sessionId, mode);
           this.events.onPermissionModeChanged?.(meta.sessionId, mode);
+          // If mode changed away from plan/bypass, flush the auto-approve queue
+          // so remaining tools become normal permission cards on the next cycle.
+          if (mode !== 'plan' && mode !== 'bypassPermissions') {
+            this.autoApproveQueue.clear(meta.sessionId);
+          }
         }
 
         const entries = parseJsonlLine(line);
@@ -433,7 +531,9 @@ export class SessionWatcher implements vscode.Disposable {
       // Pass 2: inject permission_request entries. injectPermissionRequests() does
       // its own same-batch detection: if a tool_use and its tool_result are both
       // in this batch, the tool was auto-approved and no card is injected.
-      const currentMode = this.permissionModes.get(meta.sessionId) ?? 'default';
+      const currentMode = this.events.getTrackedMode?.(meta.sessionId)
+        ?? this.permissionModes.get(meta.sessionId)
+        ?? 'default';
       const withPermissions = this.injectPermissionRequests(batchEntries, resolved, meta.sessionId, currentMode);
 
       // NOW update resolvedToolIds with this batch's tool_results (for future batches)
@@ -442,6 +542,14 @@ export class SessionWatcher implements vscode.Disposable {
           const id = entry.metadata?.tool_use_id as string | undefined;
           if (id) { resolved.add(id); }
         }
+      }
+
+      // Drain the auto-approve queue: if the in-flight tool's result just arrived,
+      // fire the keypress for the next queued tool.
+      const nextApproval = this.autoApproveQueue.drain(meta.sessionId, resolved);
+      if (nextApproval) {
+        console.log(`[Codedeck] Auto-approve drained: ${nextApproval.toolName} for ${meta.sessionId} (id=${nextApproval.toolUseId})`);
+        this.events.onAutoApprovePermission?.(meta.sessionId, nextApproval.toolUseId, nextApproval.toolName);
       }
 
       const seqEntries: Array<{ seq: number; entry: OutputEntry }> = [];
@@ -570,14 +678,24 @@ export class SessionWatcher implements vscode.Disposable {
             && !batchResolvedIds.has(toolUseId)) {
           // In bypass mode, auto-approve ALL tools
           if (sessionId && this.events.isBypassSession?.(sessionId)) {
-            console.log(`[Codedeck] Auto-approving ${toolName} in bypass mode (id=${toolUseId})`);
-            this.events.onAutoApprovePermission?.(sessionId, toolUseId, toolName);
+            const { immediate } = this.autoApproveQueue.enqueue(sessionId, toolUseId, toolName);
+            if (immediate) {
+              console.log(`[Codedeck] Auto-approving ${toolName} in bypass mode (id=${toolUseId})`);
+              this.events.onAutoApprovePermission?.(sessionId, toolUseId, toolName);
+            } else {
+              console.log(`[Codedeck] Auto-approve queued: ${toolName} in bypass mode (id=${toolUseId})`);
+            }
             continue;
           }
           // In plan mode, auto-approve read-only tools instead of prompting
           if (permissionMode === 'plan' && shouldAutoApproveInPlanMode(toolName) && sessionId) {
-            console.log(`[Codedeck] Auto-approving ${toolName} in plan mode (id=${toolUseId})`);
-            this.events.onAutoApprovePermission?.(sessionId, toolUseId, toolName);
+            const { immediate } = this.autoApproveQueue.enqueue(sessionId, toolUseId, toolName);
+            if (immediate) {
+              console.log(`[Codedeck] Auto-approving ${toolName} in plan mode (id=${toolUseId})`);
+              this.events.onAutoApprovePermission?.(sessionId, toolUseId, toolName);
+            } else {
+              console.log(`[Codedeck] Auto-approve queued: ${toolName} in plan mode (id=${toolUseId})`);
+            }
             // Don't inject permission_request — phone won't see the prompt
             continue;
           }
@@ -900,6 +1018,7 @@ export class SessionWatcher implements vscode.Disposable {
   }
 
   dispose(): void {
+    this.autoApproveQueue.clearAll();
     if (this.watcher) {
       this.watcher.dispose();
       this.watcher = null;
