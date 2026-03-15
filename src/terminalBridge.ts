@@ -321,6 +321,40 @@ export class TerminalRegistry implements vscode.Disposable {
   }
 
   /**
+   * Send text directly to a Claude Code terminal, skipping the Escape key step.
+   * Used for plan revision prompts where Escape would cancel the prompt entirely.
+   */
+  async sendTextDirect(text: string, sessionId?: string): Promise<boolean> {
+    // 1. Try the known terminal for this session
+    if (sessionId) {
+      const known = this.sessionTerminals.get(sessionId);
+      if (known && known.exitStatus === undefined) {
+        console.log(`[Codedeck] sendTextDirect delivered to terminal for session ${sessionId}: ${text.slice(0, 50)}...`);
+        await this.submitToTerminal(known, text, true);
+        return true;
+      }
+      if (known) {
+        this.sessionTerminals.delete(sessionId);
+      }
+    }
+
+    // 2. Recover by session ID slug in terminal name
+    if (sessionId) {
+      const slug = sessionId.slice(0, 8);
+      const claudeTerminals = findClaudeTerminals().filter(t => t.exitStatus === undefined);
+      const matched = claudeTerminals.find(t => t.name.includes(slug));
+      if (matched) {
+        console.log(`[Codedeck] sendTextDirect recovered terminal by slug ${slug} for session ${sessionId}: ${text.slice(0, 50)}...`);
+        this.sessionTerminals.set(sessionId, matched);
+        await this.submitToTerminal(matched, text, true);
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /**
    * Spawn a new Claude Code terminal with a specific session ID.
    *
    * Creates a terminal with the user's default shell (bash/zsh), then
@@ -408,24 +442,31 @@ export class TerminalRegistry implements vscode.Disposable {
    *
    * See: https://github.com/anthropics/claude-code/issues/15553
    */
-  private async submitToTerminal(terminal: vscode.Terminal, text: string): Promise<void> {
+  private async submitToTerminal(terminal: vscode.Terminal, text: string, skipEscape?: boolean): Promise<void> {
     // Type the text without submitting
     if (terminal.exitStatus !== undefined) { return; }
     terminal.sendText(text, false);
 
-    // Wait for autocomplete to engage
-    await new Promise(r => setTimeout(r, 300));
+    if (skipEscape) {
+      // Direct submit — used for plan revision prompts where Escape cancels the prompt
+      await new Promise(r => setTimeout(r, 100));
+      if (terminal.exitStatus !== undefined) { return; }
+      terminal.sendText('\r', false);
+    } else {
+      // Wait for autocomplete to engage
+      await new Promise(r => setTimeout(r, 300));
 
-    // Escape to dismiss autocomplete
-    if (terminal.exitStatus !== undefined) { return; }
-    terminal.sendText('\x1b', false);
+      // Escape to dismiss autocomplete
+      if (terminal.exitStatus !== undefined) { return; }
+      terminal.sendText('\x1b', false);
 
-    // Small delay before Enter
-    await new Promise(r => setTimeout(r, 100));
+      // Small delay before Enter
+      await new Promise(r => setTimeout(r, 100));
 
-    // Enter to submit
-    if (terminal.exitStatus !== undefined) { return; }
-    terminal.sendText('\r', false);
+      // Enter to submit
+      if (terminal.exitStatus !== undefined) { return; }
+      terminal.sendText('\r', false);
+    }
   }
 
   /** Clean up shell integration listeners for a terminal. */

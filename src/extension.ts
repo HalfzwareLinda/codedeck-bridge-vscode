@@ -87,6 +87,7 @@ export function activate(context: vscode.ExtensionContext): void {
     { secretKey, relays, machineName, pairedPhones, workspaceCwd, lastSeenTimestamp },
     {
       sendText: (text, sessionId?) => terminalRegistry.sendText(text, sessionId),
+      sendTextDirect: (text, sessionId?) => terminalRegistry.sendTextDirect(text, sessionId),
       sendKeypress: (key, sessionId?) => terminalRegistry.sendKeypress(key, sessionId),
       sendShiftTab: (sessionId) => terminalRegistry.sendShiftTab(sessionId),
       createSession: (sessionId, cwd?) => {
@@ -154,6 +155,7 @@ export function activate(context: vscode.ExtensionContext): void {
       terminalRegistry.sendKeypress('1', sessionId);
     },
     isBypassSession: (sessionId) => bridgeCore?.isBypassSession(sessionId) ?? false,
+    getTrackedMode: (sessionId) => bridgeCore?.getTrackedMode(sessionId),
   }, workspaceCwd);
   context.subscriptions.push(sessionWatcher);
   sessionWatcher.start();

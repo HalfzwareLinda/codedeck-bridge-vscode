@@ -28,6 +28,8 @@ export interface BridgeCoreConfig {
 
 export interface TerminalSender {
   sendText: (text: string, sessionId?: string) => Promise<boolean>;
+  /** Send text directly, skipping Escape key (for plan revision prompts). */
+  sendTextDirect: (text: string, sessionId?: string) => Promise<boolean>;
   /** Send a single raw keypress to the terminal (no Escape+Enter wrapping). */
   sendKeypress: (key: string, sessionId?: string) => Promise<boolean>;
   /** Send Shift+Tab to cycle Claude Code's permission mode. */
@@ -74,8 +76,6 @@ export class BridgeCore {
   private workspaceCwd: string;
   private secretKey: Uint8Array;
   private imageChunks: Map<string, ImageUploadTracker> = new Map();
-  /** Timestamp of the last keypress sent to each session (for post-keypress input delay). */
-  private lastKeypressTime: Map<string, number> = new Map();
 
   constructor(config: BridgeCoreConfig, terminal: TerminalSender, private log: (msg: string) => void = console.log) {
     this.terminal = terminal;
@@ -84,24 +84,13 @@ export class BridgeCore {
 
     const relayEvents: NostrRelayEvents = {
       onInput: async (sessionId, text, phonePubkey) => {
-        this.log(`[Codedeck] Input for session ${sessionId}: ${text.slice(0, 50)}...`);
+        const isRevision = this.pendingRevisionSessions.delete(sessionId);
+        this.log(`[Codedeck] Input for session ${sessionId}${isRevision ? ' (revision)' : ''}: ${text.slice(0, 50)}...`);
 
-        // If a keypress was sent recently (e.g. plan revision option '4'),
-        // delay input delivery so Claude has time to return to the input prompt.
-        // Without this delay, submitToTerminal types text while Claude is still
-        // processing the keypress, and the text gets lost.
-        const lastKp = this.lastKeypressTime.get(sessionId);
-        if (lastKp && Date.now() - lastKp < 5000) {
-          const elapsed = Date.now() - lastKp;
-          const wait = Math.max(2000 - elapsed, 0);
-          if (wait > 0) {
-            this.log(`[Codedeck] Delaying input by ${wait}ms (keypress ${elapsed}ms ago)`);
-            await new Promise(r => setTimeout(r, wait));
-          }
-          this.lastKeypressTime.delete(sessionId);
-        }
-
-        const sent = await this.terminal.sendText(text, sessionId);
+        // Plan revision text goes directly (no Escape key) since Escape cancels the revision prompt
+        const sent = isRevision
+          ? await this.terminal.sendTextDirect(text, sessionId)
+          : await this.terminal.sendText(text, sessionId);
         if (!sent) {
           // Try to auto-relaunch the session's terminal before giving up
           const sessions = this.sessionProvider?.getSessions() ?? [];
@@ -192,7 +181,6 @@ export class BridgeCore {
       },
       onKeypress: async (sessionId, key) => {
         this.log(`[Codedeck] Keypress for session ${sessionId}: ${key}`);
-        this.lastKeypressTime.set(sessionId, Date.now());
 
         // Update tracked mode based on plan approval choices.
         // Claude Code exits plan mode immediately on approval, but the JSONL
@@ -220,7 +208,11 @@ export class BridgeCore {
               this.trackedModes.set(sessionId, 'default');
               this.log(`[Codedeck] Plan option 3 — tracked mode → default for ${sessionId}`);
               break;
-            // case '4': revise plan — stays in plan mode, no change
+            case '4':
+              // Revise plan — stays in plan mode, next input is a revision (skip Escape)
+              this.pendingRevisionSessions.add(sessionId);
+              this.log(`[Codedeck] Plan option 4 — next input for ${sessionId} is a revision`);
+              break;
           }
         }
 
@@ -337,6 +329,8 @@ export class BridgeCore {
   private static readonly MODE_CYCLE = ['plan', 'default', 'acceptEdits'];
   private static readonly SHIFT_TAB_DELAY_MS = 400;
 
+  /** Sessions expecting a revision input (keypress '4' was sent). Next input skips Escape. */
+  private pendingRevisionSessions: Set<string> = new Set();
   /** Bridge-side tracked mode per session (authoritative for delta calculation). */
   private trackedModes: Map<string, string> = new Map();
   /** Serialization chain per session — prevents interleaved Shift+Tab sequences. */
@@ -349,6 +343,11 @@ export class BridgeCore {
   private modeAbort: Map<string, AbortController> = new Map();
   /** Sessions expecting a replacement after plan option 1 ("clear context & auto-accept"). */
   private pendingReplacements: Map<string, { cwd: string; timestamp: number }> = new Map();
+
+  /** Get the bridge's authoritative tracked mode for a session. */
+  getTrackedMode(sessionId: string): string | undefined {
+    return this.trackedModes.get(sessionId);
+  }
 
   /** Check if a session is in phone-side bypass mode (auto-approve all). */
   isBypassSession(sessionId: string): boolean {
