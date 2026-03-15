@@ -152,7 +152,9 @@ export function activate(context: vscode.ExtensionContext): void {
     },
     onAutoApprovePermission: (sessionId, _toolUseId, toolName) => {
       log(`[Codedeck] Auto-approving ${toolName} for ${sessionId}`);
-      terminalRegistry.sendKeypress('1', sessionId);
+      // Short delay gives Claude Code time to render the permission prompt
+      // after writing tool_use to JSONL — avoids lost keypresses under load.
+      setTimeout(() => terminalRegistry.sendKeypress('1', sessionId), 300);
     },
     isBypassSession: (sessionId) => bridgeCore?.isBypassSession(sessionId) ?? false,
     getTrackedMode: (sessionId) => bridgeCore?.getTrackedMode(sessionId),

@@ -19,8 +19,10 @@ const MAX_HISTORY_PER_SESSION = 500;
 const MAX_TOTAL_HISTORY_ENTRIES = 10_000;
 /** Sessions with no output in this window are candidates for history eviction. */
 const HISTORY_EVICT_IDLE_MS = 30 * 60 * 1000; // 30 minutes
-/** If an auto-approve keypress hasn't been answered in this time, skip it and try the next. */
+/** If an auto-approve keypress hasn't been answered in this time, retry it. */
 const AUTO_APPROVE_STALE_MS = 30_000;
+/** Maximum number of keypress retries before giving up on a stale auto-approve. */
+const AUTO_APPROVE_MAX_RETRIES = 3;
 
 interface PendingAutoApprove {
   toolUseId: string;
@@ -40,8 +42,8 @@ interface PendingAutoApprove {
  */
 class AutoApproveQueue {
   private queues: Map<string, PendingAutoApprove[]> = new Map();
-  /** The toolUseId we sent a keypress for and are waiting to see resolved. */
-  private inflight: Map<string, string> = new Map();
+  /** The tool we sent a keypress for and are waiting to see resolved. */
+  private inflight: Map<string, { toolUseId: string; toolName: string; inflightSince: number; retryCount: number }> = new Map();
 
   /**
    * Add a tool to the queue. Returns `{ immediate: true }` if nothing is
@@ -49,7 +51,7 @@ class AutoApproveQueue {
    */
   enqueue(sessionId: string, toolUseId: string, toolName: string): { immediate: boolean } {
     if (!this.inflight.has(sessionId)) {
-      this.inflight.set(sessionId, toolUseId);
+      this.inflight.set(sessionId, { toolUseId, toolName, inflightSince: Date.now(), retryCount: 0 });
       return { immediate: true };
     }
     let q = this.queues.get(sessionId);
@@ -63,19 +65,27 @@ class AutoApproveQueue {
    * resolved, pops the next queued item and returns it (caller fires keypress).
    */
   drain(sessionId: string, resolvedIds: Set<string>): PendingAutoApprove | null {
-    const inflightId = this.inflight.get(sessionId);
-    if (!inflightId) { return null; }
+    const inf = this.inflight.get(sessionId);
+    if (!inf) { return null; }
 
-    const resolved = resolvedIds.has(inflightId);
+    const resolved = resolvedIds.has(inf.toolUseId);
     const stale = !resolved && this.isStale(sessionId);
 
     if (!resolved && !stale) { return null; }
 
-    if (stale) {
-      console.log(`[Codedeck] Auto-approve stale: ${inflightId} for ${sessionId} — skipping`);
+    // Stale but retries remain — retry the same keypress
+    if (stale && inf.retryCount < AUTO_APPROVE_MAX_RETRIES) {
+      inf.retryCount++;
+      inf.inflightSince = Date.now();
+      console.log(`[Codedeck] Auto-approve stale: ${inf.toolUseId} for ${sessionId} — retry ${inf.retryCount}/${AUTO_APPROVE_MAX_RETRIES}`);
+      return { toolUseId: inf.toolUseId, toolName: inf.toolName, enqueuedAt: inf.inflightSince };
     }
 
-    // In-flight is done (or stale) — pop next
+    if (stale) {
+      console.log(`[Codedeck] Auto-approve stale: ${inf.toolUseId} for ${sessionId} — giving up after ${AUTO_APPROVE_MAX_RETRIES} retries`);
+    }
+
+    // In-flight is done (resolved or exhausted retries) — pop next
     const q = this.queues.get(sessionId);
     if (!q || q.length === 0) {
       this.inflight.delete(sessionId);
@@ -83,14 +93,13 @@ class AutoApproveQueue {
     }
     const next = q.shift()!;
     if (q.length === 0) { this.queues.delete(sessionId); }
-    this.inflight.set(sessionId, next.toolUseId);
+    this.inflight.set(sessionId, { toolUseId: next.toolUseId, toolName: next.toolName, inflightSince: Date.now(), retryCount: 0 });
     return next;
   }
 
   private isStale(sessionId: string): boolean {
-    const q = this.queues.get(sessionId);
-    // Check the oldest queued item's timestamp as a proxy
-    if (q && q.length > 0 && Date.now() - q[0].enqueuedAt > AUTO_APPROVE_STALE_MS) {
+    const inf = this.inflight.get(sessionId);
+    if (inf && Date.now() - inf.inflightSince > AUTO_APPROVE_STALE_MS) {
       return true;
     }
     return false;
