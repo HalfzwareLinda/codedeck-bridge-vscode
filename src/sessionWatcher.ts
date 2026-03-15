@@ -20,7 +20,7 @@ const MAX_TOTAL_HISTORY_ENTRIES = 10_000;
 /** Sessions with no output in this window are candidates for history eviction. */
 const HISTORY_EVICT_IDLE_MS = 30 * 60 * 1000; // 30 minutes
 /** If an auto-approve keypress hasn't been answered in this time, retry it. */
-const AUTO_APPROVE_STALE_MS = 30_000;
+const AUTO_APPROVE_STALE_MS = 3_000;
 /** Maximum number of keypress retries before giving up on a stale auto-approve. */
 const AUTO_APPROVE_MAX_RETRIES = 3;
 
@@ -105,6 +105,20 @@ class AutoApproveQueue {
     return false;
   }
 
+  /** Return all sessions with an inflight auto-approve that is stale and retriable. */
+  getStaleInflight(): Array<{ sessionId: string; toolUseId: string; toolName: string }> {
+    const result: Array<{ sessionId: string; toolUseId: string; toolName: string }> = [];
+    for (const [sessionId, inf] of this.inflight) {
+      if (Date.now() - inf.inflightSince > AUTO_APPROVE_STALE_MS
+          && inf.retryCount < AUTO_APPROVE_MAX_RETRIES) {
+        inf.retryCount++;
+        inf.inflightSince = Date.now();
+        result.push({ sessionId, toolUseId: inf.toolUseId, toolName: inf.toolName });
+      }
+    }
+    return result;
+  }
+
   clear(sessionId: string): void {
     this.queues.delete(sessionId);
     this.inflight.delete(sessionId);
@@ -148,6 +162,8 @@ export class SessionWatcher implements vscode.Disposable {
   private pollInterval: NodeJS.Timeout | null = null;
   /** Standalone interval for LRU history eviction (independent of poll cadence). */
   private evictInterval: NodeJS.Timeout | null = null;
+  /** Standalone interval for auto-approve retries (independent of JSONL reads). */
+  private autoApproveRetryInterval: NodeJS.Timeout | null = null;
   /** Guard against concurrent readNewLines for the same file. */
   private readingFiles = new Set<string>();
   private autoApproveQueue = new AutoApproveQueue();
@@ -184,6 +200,10 @@ export class SessionWatcher implements vscode.Disposable {
 
     // Standalone LRU history eviction — runs every 5 minutes, independent of polling
     this.evictInterval = setInterval(() => this.evictIdleHistory(), 5 * 60 * 1000);
+
+    // Standalone auto-approve retry — fires even when JSONL has no new content
+    // (which is exactly when retries are needed: Claude is stuck on a permission prompt)
+    this.autoApproveRetryInterval = setInterval(() => this.retryStaleAutoApprovals(), 2000);
 
     console.log(`[Codedeck] Watching ${this.claudeDir} for session changes`);
   }
@@ -756,6 +776,18 @@ export class SessionWatcher implements vscode.Disposable {
     }
   }
 
+  /** Retry stale auto-approvals independently of JSONL reads.
+   *  When Claude is stuck on a permission prompt, no new JSONL is written,
+   *  so drain() inside readNewLines() never fires. This timer ensures retries
+   *  still happen even when the file is idle. */
+  private retryStaleAutoApprovals(): void {
+    const stale = this.autoApproveQueue.getStaleInflight();
+    for (const { sessionId, toolUseId, toolName } of stale) {
+      console.log(`[Codedeck] Auto-approve retry (timer): ${toolName} for ${sessionId} (id=${toolUseId})`);
+      this.events.onAutoApprovePermission?.(sessionId, toolUseId, toolName);
+    }
+  }
+
   /** Remove sessionMeta entries for files that no longer exist on disk (Fix #13). */
   private pruneDeletedSessions(): void {
     for (const filePath of [...this.sessionMeta.keys()]) {
@@ -1039,6 +1071,10 @@ export class SessionWatcher implements vscode.Disposable {
     if (this.evictInterval) {
       clearInterval(this.evictInterval);
       this.evictInterval = null;
+    }
+    if (this.autoApproveRetryInterval) {
+      clearInterval(this.autoApproveRetryInterval);
+      this.autoApproveRetryInterval = null;
     }
     if (this.emitDebounceTimer) {
       clearTimeout(this.emitDebounceTimer);
