@@ -216,6 +216,17 @@ export class BridgeCore {
           }
         }
 
+        // After plan approval (keys 1-3), Claude Code needs time to process
+        // the keypress and transition modes. Chain a settle delay into
+        // modeQueue so any subsequent doModeSwitch waits before sending
+        // Shift+Tabs — prevents desync when user switches mode immediately.
+        if (key >= '1' && key <= '3') {
+          const prev = this.modeQueue.get(sessionId) ?? Promise.resolve();
+          this.modeQueue.set(sessionId, prev.then(() =>
+            new Promise<void>(resolve => setTimeout(resolve, BridgeCore.KEYPRESS_SETTLE_MS))
+          ));
+        }
+
         const sent = await this.terminal.sendKeypress(key, sessionId);
         if (!sent) {
           this.log(`[Codedeck] WARNING: Failed to deliver keypress '${key}' to terminal for ${sessionId}`);
@@ -328,6 +339,8 @@ export class BridgeCore {
    */
   private static readonly MODE_CYCLE = ['plan', 'default', 'acceptEdits'];
   private static readonly SHIFT_TAB_DELAY_MS = 400;
+  /** Delay after plan approval keypress before allowing Shift+Tab sequences. */
+  private static readonly KEYPRESS_SETTLE_MS = 600;
 
   /** Sessions expecting a revision input (keypress '4' was sent). Next input skips Escape. */
   private pendingRevisionSessions: Set<string> = new Set();
