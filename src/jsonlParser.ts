@@ -176,7 +176,8 @@ function parseAssistantLine(line: {
           options?: Array<{ label: string; description?: string }>;
           multiSelect?: boolean;
         }>) || [];
-        for (const q of questions) {
+        for (let qi = 0; qi < questions.length; qi++) {
+          const q = questions[qi];
           entries.push({
             entryType: 'system',
             content: q.question,
@@ -187,6 +188,8 @@ function parseAssistantLine(line: {
               header: q.header,
               options: q.options,
               multiSelect: q.multiSelect,
+              question_index: qi,
+              question_count: questions.length,
             },
           });
         }
