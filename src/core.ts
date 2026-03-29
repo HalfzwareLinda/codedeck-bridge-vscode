@@ -246,7 +246,11 @@ export class BridgeCore {
             this.bypassSessions.add(sessionId);
             this.log(`[Codedeck] Bypass mode enabled for ${sessionId} (auto-approve all)`);
             // Cycle terminal to 'default' — bypass uses default's position + auto-approve
-            this.applyModeChange(sessionId, 'default').catch(err => {
+            this.applyModeChange(sessionId, 'default').then(() => {
+              this.relay.publishModeConfirmed(sessionId, 'bypassPermissions').catch(err => {
+                this.log(`[Codedeck] Failed to publish mode-confirmed: ${err}`);
+              });
+            }).catch(err => {
               console.error('[Codedeck] Mode change failed:', err);
             });
             return;
@@ -372,16 +376,19 @@ export class BridgeCore {
    * If it contradicts trackedModes, update to the observed value (passive drift correction).
    */
   onPermissionModeObserved(sessionId: string, observedMode: string): void {
+    // bypassPermissions maps to terminal 'default' mode -- store the terminal-level
+    // mode to keep Shift+Tab delta calculations correct (bypass is not in MODE_CYCLE)
+    const terminalMode = observedMode === 'bypassPermissions' ? 'default' : observedMode;
     const tracked = this.trackedModes.get(sessionId);
-    if (tracked !== undefined && tracked !== observedMode) {
-      this.log(`[Codedeck] Mode drift detected for ${sessionId}: tracked=${tracked}, observed=${observedMode} — syncing`);
-      this.trackedModes.set(sessionId, observedMode);
+    if (tracked !== undefined && tracked !== terminalMode) {
+      this.log(`[Codedeck] Mode drift detected for ${sessionId}: tracked=${tracked}, observed=${observedMode} (terminal=${terminalMode}) — syncing`);
+      this.trackedModes.set(sessionId, terminalMode);
       // Passive correction only — the next natural session list publish will
       // include the corrected mode. Eagerly re-publishing here caused a
       // feedback loop with phone-side mode reconciliation (issue: session duplication).
     } else if (tracked === undefined) {
       // First observation — seed the tracked state
-      this.trackedModes.set(sessionId, observedMode);
+      this.trackedModes.set(sessionId, terminalMode);
     }
   }
 
@@ -407,7 +414,10 @@ export class BridgeCore {
     // Seed tracked mode from JSONL if we haven't tracked this session yet
     if (!this.trackedModes.has(sessionId)) {
       const jsonlMode = this.sessionProvider?.getPermissionMode?.(sessionId);
-      if (jsonlMode) { this.trackedModes.set(sessionId, jsonlMode); }
+      if (jsonlMode) {
+        const mapped = jsonlMode === 'bypassPermissions' ? 'default' : jsonlMode;
+        this.trackedModes.set(sessionId, mapped);
+      }
     }
 
     const currentTracked = this.trackedModes.get(sessionId) ?? 'default';
@@ -421,6 +431,36 @@ export class BridgeCore {
     if (sent) {
       this.trackedModes.set(sessionId, targetMode);
       this.log(`[Codedeck] Mode optimistically tracked as ${targetMode} for ${sessionId}`);
+
+      // Publish mode-confirmed so the phone can override its optimistic state.
+      // For bypass sessions, report 'bypassPermissions' to the phone (even
+      // though terminal is in 'default') so the phone's mode display is correct.
+      const phoneMode = this.bypassSessions.has(sessionId) && targetMode === 'default'
+        ? 'bypassPermissions'
+        : targetMode;
+      this.relay.publishModeConfirmed(sessionId, phoneMode).catch(err => {
+        this.log(`[Codedeck] Failed to publish mode-confirmed: ${err}`);
+      });
+
+      // Schedule verification: check if JSONL confirms the mode change.
+      // If drift is detected, correct trackedModes and re-attempt the switch.
+      // This prevents cascading errors from a single lost Shift+Tab keystroke.
+      const expectedMode = targetMode;
+      setTimeout(() => {
+        const observed = this.sessionProvider?.getPermissionMode?.(sessionId);
+        if (!observed) { return; } // No JSONL observation yet — can't verify
+        const mappedObserved = observed === 'bypassPermissions' ? 'default' : observed;
+        const currentTracked = this.trackedModes.get(sessionId);
+        // Only correct if trackedModes still matches our expectation
+        // (user may have switched modes again, making this verification stale)
+        if (currentTracked === expectedMode && mappedObserved !== expectedMode) {
+          this.log(`[Codedeck] Mode verification FAILED for ${sessionId}: expected=${expectedMode}, observed=${observed} — correcting and retrying`);
+          this.trackedModes.set(sessionId, mappedObserved);
+          this.applyModeChange(sessionId, expectedMode).catch(err => {
+            this.log(`[Codedeck] Mode correction retry failed for ${sessionId}: ${err}`);
+          });
+        }
+      }, 3000);
     }
   }
 

@@ -190,9 +190,17 @@ export interface SessionReplacedMessage {
   newSession: RemoteSessionInfo;
 }
 
+// --- Mode confirmation (bridge → phone) ---
+
+export interface ModeConfirmedMessage {
+  type: 'mode-confirmed';
+  sessionId: string;
+  mode: PermissionMode;
+}
+
 // --- Union ---
 
-export type BridgeOutbound = SessionListMessage | OutputMessage | HistoryResponseMessage | SessionPendingMessage | SessionReadyMessage | SessionFailedMessage | InputFailedMessage | CloseSessionAckMessage | SessionReplacedMessage;
+export type BridgeOutbound = SessionListMessage | OutputMessage | HistoryResponseMessage | SessionPendingMessage | SessionReadyMessage | SessionFailedMessage | InputFailedMessage | CloseSessionAckMessage | SessionReplacedMessage | ModeConfirmedMessage;
 export type BridgeInbound = InputMessage | PermissionResponseMessage | KeypressMessage | ModeChangeMessage | HistoryRequestMessage | CreateSessionMessage | RefreshSessionsMessage | CloseSessionMessage | UploadImageMessage;
 export type BridgeMessage = BridgeOutbound | BridgeInbound;
 

@@ -63,38 +63,43 @@ class AutoApproveQueue {
   /**
    * Called after resolvedToolIds is updated. If the in-flight tool is now
    * resolved, pops the next queued item and returns it (caller fires keypress).
+   * If retries are exhausted, returns `exhausted` info so the caller can emit
+   * a fallback permission card to the phone.
    */
-  drain(sessionId: string, resolvedIds: Set<string>): PendingAutoApprove | null {
+  drain(sessionId: string, resolvedIds: Set<string>): { next: PendingAutoApprove | null; exhausted?: { toolUseId: string; toolName: string } } {
     const inf = this.inflight.get(sessionId);
-    if (!inf) { return null; }
+    if (!inf) { return { next: null }; }
 
     const resolved = resolvedIds.has(inf.toolUseId);
     const stale = !resolved && this.isStale(sessionId);
 
-    if (!resolved && !stale) { return null; }
+    if (!resolved && !stale) { return { next: null }; }
 
     // Stale but retries remain — retry the same keypress
     if (stale && inf.retryCount < AUTO_APPROVE_MAX_RETRIES) {
       inf.retryCount++;
       inf.inflightSince = Date.now();
       console.log(`[Codedeck] Auto-approve stale: ${inf.toolUseId} for ${sessionId} — retry ${inf.retryCount}/${AUTO_APPROVE_MAX_RETRIES}`);
-      return { toolUseId: inf.toolUseId, toolName: inf.toolName, enqueuedAt: inf.inflightSince };
+      return { next: { toolUseId: inf.toolUseId, toolName: inf.toolName, enqueuedAt: inf.inflightSince } };
     }
 
+    // Retries exhausted — capture info for fallback card
+    let exhaustedInfo: { toolUseId: string; toolName: string } | undefined;
     if (stale) {
       console.log(`[Codedeck] Auto-approve stale: ${inf.toolUseId} for ${sessionId} — giving up after ${AUTO_APPROVE_MAX_RETRIES} retries`);
+      exhaustedInfo = { toolUseId: inf.toolUseId, toolName: inf.toolName };
     }
 
     // In-flight is done (resolved or exhausted retries) — pop next
     const q = this.queues.get(sessionId);
     if (!q || q.length === 0) {
       this.inflight.delete(sessionId);
-      return null;
+      return { next: null, exhausted: exhaustedInfo };
     }
     const next = q.shift()!;
     if (q.length === 0) { this.queues.delete(sessionId); }
     this.inflight.set(sessionId, { toolUseId: next.toolUseId, toolName: next.toolName, inflightSince: Date.now(), retryCount: 0 });
-    return next;
+    return { next, exhausted: exhaustedInfo };
   }
 
   private isStale(sessionId: string): boolean {
@@ -105,18 +110,34 @@ class AutoApproveQueue {
     return false;
   }
 
-  /** Return all sessions with an inflight auto-approve that is stale and retriable. */
-  getStaleInflight(): Array<{ sessionId: string; toolUseId: string; toolName: string }> {
-    const result: Array<{ sessionId: string; toolUseId: string; toolName: string }> = [];
+  /** Return all sessions with an inflight auto-approve that is stale and retriable.
+   *  Also returns exhausted items (retries exceeded) so the caller can emit fallback cards. */
+  getStaleInflight(): { retryable: Array<{ sessionId: string; toolUseId: string; toolName: string }>; exhausted: Array<{ sessionId: string; toolUseId: string; toolName: string }> } {
+    const retryable: Array<{ sessionId: string; toolUseId: string; toolName: string }> = [];
+    const exhausted: Array<{ sessionId: string; toolUseId: string; toolName: string }> = [];
     for (const [sessionId, inf] of this.inflight) {
-      if (Date.now() - inf.inflightSince > AUTO_APPROVE_STALE_MS
-          && inf.retryCount < AUTO_APPROVE_MAX_RETRIES) {
-        inf.retryCount++;
-        inf.inflightSince = Date.now();
-        result.push({ sessionId, toolUseId: inf.toolUseId, toolName: inf.toolName });
+      if (Date.now() - inf.inflightSince > AUTO_APPROVE_STALE_MS) {
+        if (inf.retryCount < AUTO_APPROVE_MAX_RETRIES) {
+          inf.retryCount++;
+          inf.inflightSince = Date.now();
+          retryable.push({ sessionId, toolUseId: inf.toolUseId, toolName: inf.toolName });
+        } else {
+          exhausted.push({ sessionId, toolUseId: inf.toolUseId, toolName: inf.toolName });
+        }
       }
     }
-    return result;
+    // Clean up exhausted inflights and advance queues
+    for (const { sessionId } of exhausted) {
+      this.inflight.delete(sessionId);
+      const q = this.queues.get(sessionId);
+      if (q && q.length > 0) {
+        const next = q.shift()!;
+        if (q.length === 0) this.queues.delete(sessionId);
+        this.inflight.set(sessionId, { toolUseId: next.toolUseId, toolName: next.toolName, inflightSince: Date.now(), retryCount: 0 });
+        retryable.push({ sessionId, toolUseId: next.toolUseId, toolName: next.toolName });
+      }
+    }
+    return { retryable, exhausted };
   }
 
   clear(sessionId: string): void {
@@ -574,11 +595,26 @@ export class SessionWatcher implements vscode.Disposable {
       }
 
       // Drain the auto-approve queue: if the in-flight tool's result just arrived,
-      // fire the keypress for the next queued tool.
-      const nextApproval = this.autoApproveQueue.drain(meta.sessionId, resolved);
-      if (nextApproval) {
-        console.log(`[Codedeck] Auto-approve drained: ${nextApproval.toolName} for ${meta.sessionId} (id=${nextApproval.toolUseId})`);
-        this.events.onAutoApprovePermission?.(meta.sessionId, nextApproval.toolUseId, nextApproval.toolName);
+      // fire the keypress for the next queued tool. If retries exhausted, emit
+      // a fallback permission card so the phone can handle it manually.
+      const drainResult = this.autoApproveQueue.drain(meta.sessionId, resolved);
+      if (drainResult.exhausted) {
+        const { toolUseId, toolName } = drainResult.exhausted;
+        console.log(`[Codedeck] Auto-approve exhausted for ${toolName} (id=${toolUseId}) — emitting fallback permission card`);
+        withPermissions.push({
+          entryType: 'system',
+          content: `${toolName}: permission required (auto-approve failed)`,
+          timestamp: new Date().toISOString(),
+          metadata: {
+            special: 'permission_request',
+            tool_name: toolName,
+            tool_use_id: toolUseId,
+          },
+        });
+      }
+      if (drainResult.next) {
+        console.log(`[Codedeck] Auto-approve drained: ${drainResult.next.toolName} for ${meta.sessionId} (id=${drainResult.next.toolUseId})`);
+        this.events.onAutoApprovePermission?.(meta.sessionId, drainResult.next.toolUseId, drainResult.next.toolName);
       }
 
       const seqEntries: Array<{ seq: number; entry: OutputEntry }> = [];
@@ -779,12 +815,32 @@ export class SessionWatcher implements vscode.Disposable {
   /** Retry stale auto-approvals independently of JSONL reads.
    *  When Claude is stuck on a permission prompt, no new JSONL is written,
    *  so drain() inside readNewLines() never fires. This timer ensures retries
-   *  still happen even when the file is idle. */
+   *  still happen even when the file is idle.
+   *  When retries are exhausted, emits a fallback permission card to the phone. */
   private retryStaleAutoApprovals(): void {
-    const stale = this.autoApproveQueue.getStaleInflight();
-    for (const { sessionId, toolUseId, toolName } of stale) {
+    const { retryable, exhausted } = this.autoApproveQueue.getStaleInflight();
+    for (const { sessionId, toolUseId, toolName } of retryable) {
       console.log(`[Codedeck] Auto-approve retry (timer): ${toolName} for ${sessionId} (id=${toolUseId})`);
       this.events.onAutoApprovePermission?.(sessionId, toolUseId, toolName);
+    }
+    for (const { sessionId, toolUseId, toolName } of exhausted) {
+      console.log(`[Codedeck] Auto-approve exhausted (timer): ${toolName} for ${sessionId} (id=${toolUseId}) — emitting fallback permission card`);
+      const seq = (this.seqCounters.get(sessionId) ?? 0) + 1;
+      this.seqCounters.set(sessionId, seq);
+      const entry: OutputEntry = {
+        entryType: 'system',
+        content: `${toolName}: permission required (auto-approve failed)`,
+        timestamp: new Date().toISOString(),
+        metadata: {
+          special: 'permission_request',
+          tool_name: toolName,
+          tool_use_id: toolUseId,
+        },
+      };
+      let history = this.sessionHistory.get(sessionId);
+      if (!history) { history = []; this.sessionHistory.set(sessionId, history); }
+      history.push({ seq, entry });
+      this.events.onOutput(sessionId, [{ seq, entry }]);
     }
   }
 
@@ -1022,7 +1078,9 @@ export class SessionWatcher implements vscode.Disposable {
           lineCount: this.fileOffsets.get(filePath) ?? 0,
           title: meta.title ?? null,
           project: this.resolveProjectName(meta, filePath),
-          permissionMode: (this.permissionModes.get(meta.sessionId) as RemoteSessionInfo['permissionMode']) ?? undefined,
+          permissionMode: (this.events.getTrackedMode?.(meta.sessionId) as RemoteSessionInfo['permissionMode'])
+            ?? (this.permissionModes.get(meta.sessionId) as RemoteSessionInfo['permissionMode'])
+            ?? undefined,
         });
       } catch {
         // File gone

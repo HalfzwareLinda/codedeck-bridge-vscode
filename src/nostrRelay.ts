@@ -634,6 +634,17 @@ export class NostrRelay {
     return this.publishToAllPhones(msg, 60);
   }
 
+  /** Publish mode-confirmed feedback after a mode switch completes (NIP-40: expires in 30s). */
+  async publishModeConfirmed(sessionId: string, mode: string): Promise<boolean> {
+    const msg: import('./types').ModeConfirmedMessage = {
+      type: 'mode-confirmed',
+      sessionId,
+      mode: mode as import('./types').PermissionMode,
+    };
+    this.log(`[Codedeck] Publishing mode-confirmed: session=${sessionId}, mode=${mode}`);
+    return this.publishToAllPhones(msg, 30);
+  }
+
   private static readonly HISTORY_CHUNK_SIZE = 20;
   private static readonly MAX_CHUNK_JSON_BYTES = 48_000;
   private static readonly CHUNK_DELAY_MS = 500;
