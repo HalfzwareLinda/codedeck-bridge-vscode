@@ -64,6 +64,13 @@ export class NostrRelay {
   // to bridge the gap after a crash instead of using an arbitrary window.
   private _lastSeenTimestamp: number;
 
+  // --- Event deduplication ---
+  // Tracks recently processed nostr event IDs to prevent replayed events
+  // (from relay reconnections with overlapping `since` windows) from
+  // triggering duplicate side effects like spawning multiple terminals.
+  private processedEventIds: Set<string> = new Set();
+  private static readonly MAX_PROCESSED_EVENT_IDS = 1000;
+
   // --- Output throttling ---
   // Queue output entries and flush at most once per interval to avoid relay rate-limits.
   private outputQueue: Array<{ sessionId: string; seq: number; entry: OutputEntry }> = [];
@@ -227,6 +234,7 @@ export class NostrRelay {
   dispose(): void {
     this.disposed = true;
     this.disconnect();
+    this.processedEventIds.clear();
   }
 
   isConnected(): boolean {
@@ -761,12 +769,23 @@ export class NostrRelay {
     this.splitIfOversized(chunk.slice(mid), out);
   }
 
-  private handleIncomingEvent(event: { pubkey: string; content: string; created_at: number }): void {
+  private handleIncomingEvent(event: { id: string; pubkey: string; content: string; created_at: number }): void {
     // Safety net: ignore events older than 60s (in case relays don't enforce `since`)
     const now = Math.floor(Date.now() / 1000);
     if (event.created_at < now - 300) {
       this.log(`[Codedeck] Ignoring stale event (${now - event.created_at}s old)`);
       return;
+    }
+
+    // Deduplicate: skip events we've already processed (relay reconnections
+    // with overlapping `since` windows can replay the same event).
+    if (this.processedEventIds.has(event.id)) {
+      return;
+    }
+    this.processedEventIds.add(event.id);
+    if (this.processedEventIds.size > NostrRelay.MAX_PROCESSED_EVENT_IDS) {
+      const first = this.processedEventIds.values().next().value;
+      if (first !== undefined) { this.processedEventIds.delete(first); }
     }
 
     // Verify it's from a paired phone
