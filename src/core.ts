@@ -299,6 +299,8 @@ export class BridgeCore {
         this.bypassSessions.delete(sessionId);
         this.trackedModes.delete(sessionId);
         this.modeQueue.delete(sessionId);
+        this.pendingModeVerification.delete(sessionId);
+        this.pendingRetryCount.delete(sessionId);
         const found = this.terminal.closeSession(sessionId);
         // Re-publish session list excluding the closed session
         const sessions = (this.sessionProvider?.getSessions() ?? [])
@@ -368,6 +370,12 @@ export class BridgeCore {
   private modeAbort: Map<string, AbortController> = new Map();
   /** Sessions expecting a replacement after plan option 1 ("clear context & auto-accept"). */
   private pendingReplacements: Map<string, { cwd: string; timestamp: number }> = new Map();
+  /** Pending mode verification: after an optimistic update, stores what we expect confirmed by JSONL. */
+  private pendingModeVerification: Map<string, { expectedMode: string; timestamp: number; retryCount: number }> = new Map();
+  /** Retry count carried across applyModeChange calls for verification retries. */
+  private pendingRetryCount: Map<string, number> = new Map();
+  private static readonly MODE_VERIFY_WINDOW_MS = 10_000;
+  private static readonly MODE_VERIFY_MAX_RETRIES = 2;
 
   /** Get the bridge's authoritative tracked mode for a session. */
   getTrackedMode(sessionId: string): string | undefined {
@@ -379,14 +387,18 @@ export class BridgeCore {
     return this.bypassSessions.has(sessionId);
   }
 
+  /** Map any permission mode to its terminal-level equivalent in MODE_CYCLE. */
+  private toTerminalMode(mode: string): string {
+    return mode === 'bypassPermissions' ? 'default' : mode;
+  }
+
   /**
    * Called when a JSONL user entry reveals the actual permissionMode.
    * If it contradicts trackedModes, update to the observed value (passive drift correction).
+   * Also performs event-driven verification of pending mode switches.
    */
   onPermissionModeObserved(sessionId: string, observedMode: string): void {
-    // bypassPermissions maps to terminal 'default' mode -- store the terminal-level
-    // mode to keep Shift+Tab delta calculations correct (bypass is not in MODE_CYCLE)
-    const terminalMode = observedMode === 'bypassPermissions' ? 'default' : observedMode;
+    const terminalMode = this.toTerminalMode(observedMode);
     const tracked = this.trackedModes.get(sessionId);
     if (tracked !== undefined && tracked !== terminalMode) {
       this.log(`[Codedeck] Mode drift detected for ${sessionId}: tracked=${tracked}, observed=${observedMode} (terminal=${terminalMode}) — syncing`);
@@ -398,6 +410,33 @@ export class BridgeCore {
       // First observation — seed the tracked state
       this.trackedModes.set(sessionId, terminalMode);
     }
+
+    // Event-driven verification: check if a pending mode switch needs correction
+    const pending = this.pendingModeVerification.get(sessionId);
+    if (!pending) { return; }
+
+    if (Date.now() - pending.timestamp > BridgeCore.MODE_VERIFY_WINDOW_MS) {
+      this.pendingModeVerification.delete(sessionId);
+      return;
+    }
+
+    if (terminalMode === pending.expectedMode) {
+      this.pendingModeVerification.delete(sessionId);
+      return; // verified OK
+    }
+
+    this.pendingModeVerification.delete(sessionId);
+    if (pending.retryCount >= BridgeCore.MODE_VERIFY_MAX_RETRIES) {
+      this.log(`[Codedeck] Mode verification for ${sessionId}: max retries (${pending.retryCount}) reached, accepting observed=${terminalMode}`);
+      return;
+    }
+
+    this.log(`[Codedeck] Mode verification FAILED for ${sessionId}: expected=${pending.expectedMode}, observed=${observedMode} — retry ${pending.retryCount + 1}`);
+    // trackedModes already corrected by drift detection above.
+    this.pendingRetryCount.set(sessionId, pending.retryCount + 1);
+    this.applyModeChange(sessionId, pending.expectedMode).catch(err => {
+      this.log(`[Codedeck] Mode correction retry failed for ${sessionId}: ${err}`);
+    });
   }
 
   private async applyModeChange(sessionId: string, targetMode: string): Promise<void> {
@@ -423,8 +462,7 @@ export class BridgeCore {
     if (!this.trackedModes.has(sessionId)) {
       const jsonlMode = this.sessionProvider?.getPermissionMode?.(sessionId);
       if (jsonlMode) {
-        const mapped = jsonlMode === 'bypassPermissions' ? 'default' : jsonlMode;
-        this.trackedModes.set(sessionId, mapped);
+        this.trackedModes.set(sessionId, this.toTerminalMode(jsonlMode));
       }
     }
 
@@ -450,25 +488,15 @@ export class BridgeCore {
         this.log(`[Codedeck] Failed to publish mode-confirmed: ${err}`);
       });
 
-      // Schedule verification: check if JSONL confirms the mode change.
-      // If drift is detected, correct trackedModes and re-attempt the switch.
-      // This prevents cascading errors from a single lost Shift+Tab keystroke.
-      const expectedMode = targetMode;
-      setTimeout(() => {
-        const observed = this.sessionProvider?.getPermissionMode?.(sessionId);
-        if (!observed) { return; } // No JSONL observation yet — can't verify
-        const mappedObserved = observed === 'bypassPermissions' ? 'default' : observed;
-        const currentTracked = this.trackedModes.get(sessionId);
-        // Only correct if trackedModes still matches our expectation
-        // (user may have switched modes again, making this verification stale)
-        if (currentTracked === expectedMode && mappedObserved !== expectedMode) {
-          this.log(`[Codedeck] Mode verification FAILED for ${sessionId}: expected=${expectedMode}, observed=${observed} — correcting and retrying`);
-          this.trackedModes.set(sessionId, mappedObserved);
-          this.applyModeChange(sessionId, expectedMode).catch(err => {
-            this.log(`[Codedeck] Mode correction retry failed for ${sessionId}: ${err}`);
-          });
-        }
-      }, 3000);
+      // Register event-driven verification: onPermissionModeObserved will check
+      // whether JSONL confirms this mode change and retry if not (max 2 attempts).
+      const retryCount = this.pendingRetryCount.get(sessionId) ?? 0;
+      this.pendingRetryCount.delete(sessionId);
+      this.pendingModeVerification.set(sessionId, {
+        expectedMode: targetMode,
+        timestamp: Date.now(),
+        retryCount,
+      });
     }
   }
 
@@ -512,7 +540,7 @@ export class BridgeCore {
     // Seed trackedModes for sessions not yet tracked (e.g., after extension reload)
     for (const s of sessions) {
       if (!this.trackedModes.has(s.id)) {
-        this.trackedModes.set(s.id, s.permissionMode ?? 'default');
+        this.trackedModes.set(s.id, this.toTerminalMode(s.permissionMode ?? 'default'));
       }
     }
 
