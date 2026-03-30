@@ -214,12 +214,10 @@ export interface SessionWatcherEvents {
   onExistingSession?: (sessionId: string, cwd: string) => void;
   /** Fired when a JSONL user entry reveals the session's actual permissionMode. */
   onPermissionModeChanged?: (sessionId: string, mode: string) => void;
-  /** Fired when a tool permission should be auto-approved (e.g. read-only tools in plan mode, or bypass mode). */
+  /** Fired when a tool permission should be auto-approved (e.g. read-only tools in plan mode, or default/YOLO mode). */
   onAutoApprovePermission?: (sessionId: string, toolUseId: string, toolName: string) => void;
   /** Fired when a pending auto-approve keypress should be cancelled (e.g. plan/question menu detected). */
   onCancelAutoApprove?: (toolUseId: string) => void;
-  /** Check if a session is in phone-side bypass mode (auto-approve all permission prompts). */
-  isBypassSession?: (sessionId: string) => boolean;
   /** Get the bridge's authoritative tracked mode (set optimistically on mode change). */
   getTrackedMode?: (sessionId: string) => string | undefined;
 }
@@ -621,9 +619,9 @@ export class SessionWatcher implements vscode.Disposable {
         if (mode) {
           this.permissionModes.set(meta.sessionId, mode);
           this.events.onPermissionModeChanged?.(meta.sessionId, mode);
-          // If mode changed away from plan/bypass, flush the auto-approve queue
-          // so remaining tools become normal permission cards on the next cycle.
-          if (mode !== 'plan' && mode !== 'bypassPermissions') {
+          // If mode changed away from plan or default (YOLO), flush the auto-approve
+          // queue so remaining tools become normal permission cards on the next cycle.
+          if (mode !== 'plan' && mode !== 'default') {
             this.autoApproveQueue.clear(meta.sessionId);
           }
         }
@@ -820,14 +818,14 @@ export class SessionWatcher implements vscode.Disposable {
         if (toolName && toolNeedsPermission(toolName)
             && !resolvedIds.has(toolUseId)
             && !batchResolvedIds.has(toolUseId)) {
-          // In bypass mode, auto-approve ALL tools
-          if (sessionId && this.events.isBypassSession?.(sessionId)) {
+          // In default (YOLO) mode, auto-approve ALL tools
+          if (sessionId && permissionMode === 'default') {
             const { immediate } = this.autoApproveQueue.enqueue(sessionId, toolUseId, toolName);
             if (immediate) {
-              console.log(`[Codedeck] Auto-approving ${toolName} in bypass mode (id=${toolUseId})`);
+              console.log(`[Codedeck] Auto-approving ${toolName} in default mode (id=${toolUseId})`);
               this.events.onAutoApprovePermission?.(sessionId, toolUseId, toolName);
             } else {
-              console.log(`[Codedeck] Auto-approve queued: ${toolName} in bypass mode (id=${toolUseId})`);
+              console.log(`[Codedeck] Auto-approve queued: ${toolName} in default mode (id=${toolUseId})`);
             }
             continue;
           }

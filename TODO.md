@@ -6,7 +6,7 @@
 
 ## Permissions
 
-- [ ] **CDB-002: Consider `--dangerously-skip-permissions` CLI flag** — For sessions that start in bypass mode, spawn Claude with `--dangerously-skip-permissions` instead of using the mockup auto-approve approach. Eliminates race conditions and latency from keypress-based auto-approval. Can't be toggled mid-session (requires process restart), so keep mockup fallback for mid-session switches.
+- [ ] **CDB-002: Consider `--dangerously-skip-permissions` CLI flag** — For sessions that start in default (YOLO) mode, spawn Claude with `--dangerously-skip-permissions` instead of using the bridge auto-approve approach. Eliminates race conditions and latency from keypress-based auto-approval. Can't be toggled mid-session (requires process restart), so keep bridge auto-approve fallback for mid-session switches.
 
 ## Relay Hygiene (NIP-40 Expiration)
 

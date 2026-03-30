@@ -174,7 +174,6 @@ export function activate(context: vscode.ExtensionContext): void {
         log(`[Codedeck] Cancelled pending auto-approve for ${toolUseId}`);
       }
     },
-    isBypassSession: (sessionId) => bridgeCore?.isBypassSession(sessionId) ?? false,
     getTrackedMode: (sessionId) => bridgeCore?.getTrackedMode(sessionId),
   }, workspaceCwd);
   context.subscriptions.push(sessionWatcher);

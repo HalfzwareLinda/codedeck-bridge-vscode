@@ -67,7 +67,7 @@ export interface KeypressMessage {
   key: string;
 }
 
-export type PermissionMode = 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions';
+export type PermissionMode = 'default' | 'acceptEdits' | 'plan';
 
 export interface ModeChangeMessage {
   type: 'mode';

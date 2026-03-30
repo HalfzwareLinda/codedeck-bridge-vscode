@@ -250,9 +250,7 @@ export class BridgeCore {
 
         // Publish mode-confirmed after successful plan approval delivery
         if (sent && planApprovalMode !== undefined) {
-          const phoneMode = this.bypassSessions.has(sessionId) && planApprovalMode === 'default'
-            ? 'bypassPermissions' : planApprovalMode;
-          this.relay.publishModeConfirmed(sessionId, phoneMode).catch(err => {
+          this.relay.publishModeConfirmed(sessionId, planApprovalMode).catch(err => {
             this.log(`[Codedeck] Failed to publish mode-confirmed: ${err}`);
           });
         }
@@ -264,18 +262,9 @@ export class BridgeCore {
         if (pending) { clearTimeout(pending); }
         this.modeDebounce.set(sessionId, setTimeout(() => {
           this.modeDebounce.delete(sessionId);
-          if (mode === 'bypassPermissions') {
-            this.bypassSessions.add(sessionId);
-            this.log(`[Codedeck] Bypass mode enabled for ${sessionId} (auto-approve all)`);
-            // Cycle terminal to 'default' — bypass uses default's position + auto-approve.
-            // doModeSwitch handles mode-confirmed (sees bypassSessions.has → publishes 'bypassPermissions').
-            this.applyModeChange(sessionId, 'default').catch(err => {
-              console.error('[Codedeck] Mode change failed:', err);
-            });
-            return;
-          }
-          this.bypassSessions.delete(sessionId);
-          this.applyModeChange(sessionId, mode).catch(err => {
+          // Legacy: old phone APKs may still send 'bypassPermissions' — treat as 'default'
+          const terminalMode = mode === 'bypassPermissions' ? 'default' : mode;
+          this.applyModeChange(sessionId, terminalMode).catch(err => {
             console.error('[Codedeck] Mode change failed:', err);
           });
         }, 300));
@@ -307,7 +296,6 @@ export class BridgeCore {
       },
       onCloseSession: async (sessionId) => {
         this.log(`[Codedeck] Close session request for ${sessionId}`);
-        this.bypassSessions.delete(sessionId);
         this.trackedModes.delete(sessionId);
         this.modeQueue.delete(sessionId);
         this.pendingModeVerification.delete(sessionId);
@@ -353,9 +341,9 @@ export class BridgeCore {
   /**
    * Mode cycling via Shift+Tab keypresses.
    * Claude Code's actual Shift+Tab cycle: plan → default → acceptEdits (3 modes).
+   * Phone cycle matches: PLAN → YOLO (default) → EDITS.
    *
-   * Phone cycle: PLAN → BYPASS → EDITS.
-   * BYPASS maps to terminal 'default' + bridge auto-approves all permission prompts.
+   * In 'default' mode the bridge auto-approves all permission prompts (YOLO).
    *
    * Uses optimistic tracking instead of JSONL verification because Claude Code
    * only writes permissionMode to JSONL on user entries (not on mode changes).
@@ -373,8 +361,6 @@ export class BridgeCore {
   private trackedModes: Map<string, string> = new Map();
   /** Serialization chain per session — prevents interleaved Shift+Tab sequences. */
   private modeQueue: Map<string, Promise<void>> = new Map();
-  /** Sessions where the phone has requested bypass — bridge auto-approves all permission prompts. */
-  private bypassSessions: Set<string> = new Set();
   /** Per-session debounce timer for incoming mode changes (collapses rapid-fire requests). */
   private modeDebounce: Map<string, ReturnType<typeof setTimeout>> = new Map();
   /** Per-session AbortController to cancel in-flight Shift+Tab sequences. */
@@ -393,33 +379,22 @@ export class BridgeCore {
     return this.trackedModes.get(sessionId);
   }
 
-  /** Check if a session is in phone-side bypass mode (auto-approve all). */
-  isBypassSession(sessionId: string): boolean {
-    return this.bypassSessions.has(sessionId);
-  }
-
-  /** Map any permission mode to its terminal-level equivalent in MODE_CYCLE. */
-  private toTerminalMode(mode: string): string {
-    return mode === 'bypassPermissions' ? 'default' : mode;
-  }
-
   /**
    * Called when a JSONL user entry reveals the actual permissionMode.
    * If it contradicts trackedModes, update to the observed value (passive drift correction).
    * Also performs event-driven verification of pending mode switches.
    */
   onPermissionModeObserved(sessionId: string, observedMode: string): void {
-    const terminalMode = this.toTerminalMode(observedMode);
     const tracked = this.trackedModes.get(sessionId);
-    if (tracked !== undefined && tracked !== terminalMode) {
-      this.log(`[Codedeck] Mode drift detected for ${sessionId}: tracked=${tracked}, observed=${observedMode} (terminal=${terminalMode}) — syncing`);
-      this.trackedModes.set(sessionId, terminalMode);
+    if (tracked !== undefined && tracked !== observedMode) {
+      this.log(`[Codedeck] Mode drift detected for ${sessionId}: tracked=${tracked}, observed=${observedMode} — syncing`);
+      this.trackedModes.set(sessionId, observedMode);
       // Passive correction only — the next natural session list publish will
       // include the corrected mode. Eagerly re-publishing here caused a
       // feedback loop with phone-side mode reconciliation (issue: session duplication).
     } else if (tracked === undefined) {
       // First observation — seed the tracked state
-      this.trackedModes.set(sessionId, terminalMode);
+      this.trackedModes.set(sessionId, observedMode);
     }
 
     // Event-driven verification: check if a pending mode switch needs correction
@@ -431,14 +406,14 @@ export class BridgeCore {
       return;
     }
 
-    if (terminalMode === pending.expectedMode) {
+    if (observedMode === pending.expectedMode) {
       this.pendingModeVerification.delete(sessionId);
       return; // verified OK
     }
 
     this.pendingModeVerification.delete(sessionId);
     if (pending.retryCount >= BridgeCore.MODE_VERIFY_MAX_RETRIES) {
-      this.log(`[Codedeck] Mode verification for ${sessionId}: max retries (${pending.retryCount}) reached, accepting observed=${terminalMode}`);
+      this.log(`[Codedeck] Mode verification for ${sessionId}: max retries (${pending.retryCount}) reached, accepting observed=${observedMode}`);
       return;
     }
 
@@ -473,7 +448,7 @@ export class BridgeCore {
     if (!this.trackedModes.has(sessionId)) {
       const jsonlMode = this.sessionProvider?.getPermissionMode?.(sessionId);
       if (jsonlMode) {
-        this.trackedModes.set(sessionId, this.toTerminalMode(jsonlMode));
+        this.trackedModes.set(sessionId, jsonlMode);
       }
     }
 
@@ -481,9 +456,7 @@ export class BridgeCore {
     if (currentTracked === targetMode) {
       this.log(`[Codedeck] Already in ${targetMode} mode for ${sessionId}`);
       // Still confirm to the phone — it may be out of sync and sent this request to re-synchronize.
-      const phoneMode = this.bypassSessions.has(sessionId) && targetMode === 'default'
-        ? 'bypassPermissions' : targetMode;
-      this.relay.publishModeConfirmed(sessionId, phoneMode).catch(err => {
+      this.relay.publishModeConfirmed(sessionId, targetMode).catch(err => {
         this.log(`[Codedeck] Failed to publish mode-confirmed: ${err}`);
       });
       return;
@@ -497,12 +470,7 @@ export class BridgeCore {
       this.log(`[Codedeck] Mode optimistically tracked as ${targetMode} for ${sessionId}`);
 
       // Publish mode-confirmed so the phone can override its optimistic state.
-      // For bypass sessions, report 'bypassPermissions' to the phone (even
-      // though terminal is in 'default') so the phone's mode display is correct.
-      const phoneMode = this.bypassSessions.has(sessionId) && targetMode === 'default'
-        ? 'bypassPermissions'
-        : targetMode;
-      this.relay.publishModeConfirmed(sessionId, phoneMode).catch(err => {
+      this.relay.publishModeConfirmed(sessionId, targetMode).catch(err => {
         this.log(`[Codedeck] Failed to publish mode-confirmed: ${err}`);
       });
 
@@ -518,10 +486,8 @@ export class BridgeCore {
     } else if (result === 'failed') {
       // Terminal gone or Shift+Tab delivery failed. Tell the phone where we actually are
       // so it can revert its optimistic state. Verification timer handles partial-delivery drift.
-      const phoneMode = this.bypassSessions.has(sessionId) && currentTracked === 'default'
-        ? 'bypassPermissions' : currentTracked;
-      this.log(`[Codedeck] Mode switch failed for ${sessionId} — confirming current: ${phoneMode}`);
-      this.relay.publishModeConfirmed(sessionId, phoneMode).catch(err => {
+      this.log(`[Codedeck] Mode switch failed for ${sessionId} — confirming current: ${currentTracked}`);
+      this.relay.publishModeConfirmed(sessionId, currentTracked).catch(err => {
         this.log(`[Codedeck] Failed to publish mode-confirmed (failure): ${err}`);
       });
     }
@@ -568,7 +534,7 @@ export class BridgeCore {
     // Seed trackedModes for sessions not yet tracked (e.g., after extension reload)
     for (const s of sessions) {
       if (!this.trackedModes.has(s.id)) {
-        this.trackedModes.set(s.id, this.toTerminalMode(s.permissionMode ?? 'default'));
+        this.trackedModes.set(s.id, s.permissionMode ?? 'default');
       }
     }
 
@@ -604,10 +570,6 @@ export class BridgeCore {
           if (oldMode) {
             this.trackedModes.set(sessionId, oldMode);
             this.trackedModes.delete(oldSessionId);
-          }
-          if (this.bypassSessions.has(oldSessionId)) {
-            this.bypassSessions.add(sessionId);
-            this.bypassSessions.delete(oldSessionId);
           }
           // Notify phones so they can swap the session in their UI
           this.relay.publishSessionReplaced(oldSessionId, newSession).catch(err => {

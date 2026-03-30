@@ -249,7 +249,7 @@ describe('parseJsonlLine', () => {
 
   it('handles real JSONL from Claude Code', () => {
     // Real user message from a Claude Code session
-    const userLine = '{"parentUuid":null,"isSidechain":false,"userType":"external","cwd":"/home/jeroen/VScode workspace for building nostr apps","sessionId":"00ad78e2-a612-49a4-8533-8421f5e9306a","version":"2.1.37","gitBranch":"HEAD","type":"user","message":{"role":"user","content":[{"type":"text","text":"Hello Claude"}]},"uuid":"a93e967a-c990-4ca9-9dc7-3f2e03e93407","timestamp":"2026-02-09T18:59:57.210Z","permissionMode":"bypassPermissions"}';
+    const userLine = '{"parentUuid":null,"isSidechain":false,"userType":"external","cwd":"/home/jeroen/VScode workspace for building nostr apps","sessionId":"00ad78e2-a612-49a4-8533-8421f5e9306a","version":"2.1.37","gitBranch":"HEAD","type":"user","message":{"role":"user","content":[{"type":"text","text":"Hello Claude"}]},"uuid":"a93e967a-c990-4ca9-9dc7-3f2e03e93407","timestamp":"2026-02-09T18:59:57.210Z","permissionMode":"default"}';
 
     const entries = parseJsonlLine(userLine);
     expect(entries).toHaveLength(1);
@@ -438,10 +438,10 @@ describe('extractPermissionMode', () => {
       uuid: 'u1',
       sessionId: 's1',
       cwd: '/w',
-      permissionMode: 'bypassPermissions',
+      permissionMode: 'default',
       message: { role: 'user', content: [{ type: 'text', text: 'hi' }] },
     });
-    expect(extractPermissionMode(line)).toBe('bypassPermissions');
+    expect(extractPermissionMode(line)).toBe('default');
   });
 
   it('returns undefined for non-user entries', () => {
@@ -459,7 +459,7 @@ describe('extractPermissionMode', () => {
   });
 
   it('extracts all known permission modes', () => {
-    for (const mode of ['default', 'plan', 'acceptEdits', 'bypassPermissions']) {
+    for (const mode of ['default', 'plan', 'acceptEdits']) {
       const line = JSON.stringify({ type: 'user', uuid: 'u1', permissionMode: mode, message: { role: 'user', content: [] } });
       expect(extractPermissionMode(line)).toBe(mode);
     }
@@ -499,7 +499,7 @@ describe('toolNeedsPermission (denylist + same-batch detection)', () => {
   });
 
   it('ignores permissionMode parameter (mode-independent)', () => {
-    expect(toolNeedsPermission('Bash', 'bypassPermissions')).toBe(true);
-    expect(toolNeedsPermission('Read', 'default')).toBe(true);
+    expect(toolNeedsPermission('Bash', 'default')).toBe(true);
+    expect(toolNeedsPermission('Read', 'plan')).toBe(true);
   });
 });
