@@ -192,16 +192,21 @@ export class BridgeCore {
           });
         }
       },
-      onKeypress: async (sessionId, key) => {
-        this.log(`[Codedeck] Keypress for session ${sessionId}: ${key}`);
+      onKeypress: async (sessionId, key, context?) => {
+        this.log(`[Codedeck] Keypress for session ${sessionId}: ${key}${context ? ` (context: ${context})` : ''}`);
 
         // Update tracked mode based on plan approval choices.
         // Claude Code exits plan mode immediately on approval, but the JSONL
         // permissionMode field only appears on the next user entry. Without
         // preemptive tracking, subsequent mode switches calculate wrong Shift+Tab deltas.
+        //
+        // Only apply plan approval logic when context is 'plan-approval' or
+        // undefined (backward compat with older phone versions that don't send context).
+        // When context is 'question', skip entirely — the keypress is answering
+        // an AskUserQuestion, not approving a plan.
         let planApprovalMode: string | undefined;
 
-        if (this.trackedModes.get(sessionId) === 'plan') {
+        if (this.trackedModes.get(sessionId) === 'plan' && context !== 'question') {
           switch (key) {
             case '1': {
               // Clear context & auto-accept → new session spawns with acceptEdits
@@ -238,7 +243,7 @@ export class BridgeCore {
         // the keypress and transition modes. Chain a settle delay into
         // modeQueue so any subsequent doModeSwitch waits before sending
         // Shift+Tabs — prevents desync when user switches mode immediately.
-        if (key >= '1' && key <= '3') {
+        if (planApprovalMode !== undefined) {
           const prev = this.modeQueue.get(sessionId) ?? Promise.resolve();
           this.modeQueue.set(sessionId, prev.then(() =>
             new Promise<void>(resolve => setTimeout(resolve, BridgeCore.KEYPRESS_SETTLE_MS))

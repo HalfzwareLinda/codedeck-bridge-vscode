@@ -32,7 +32,7 @@ import { SESSION_LIST_EVENT_KIND, OUTPUT_EVENT_KIND } from './types';
 export interface NostrRelayEvents {
   onInput: (sessionId: string, text: string, phonePubkey: string) => void;
   onPermissionResponse: (sessionId: string, requestId: string, allow: boolean, modifier?: 'always' | 'never') => void;
-  onKeypress: (sessionId: string, key: string) => void;
+  onKeypress: (sessionId: string, key: string, context?: 'plan-approval' | 'question') => void;
   onModeChange: (sessionId: string, mode: string) => void;
   onHistoryRequest: (sessionId: string, afterSeq: number | undefined, phonePubkey: string) => void;
   onCreateSession: () => void;
@@ -842,7 +842,7 @@ export class NostrRelay {
             .catch(err => console.error('[Codedeck] onPermissionResponse handler error:', err));
           break;
         case 'keypress':
-          Promise.resolve(this.events.onKeypress(msg.sessionId, msg.key))
+          Promise.resolve(this.events.onKeypress(msg.sessionId, msg.key, msg.context))
             .catch(err => console.error('[Codedeck] onKeypress handler error:', err));
           break;
         case 'mode':

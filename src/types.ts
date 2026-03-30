@@ -65,6 +65,7 @@ export interface KeypressMessage {
   type: 'keypress';
   sessionId: string;
   key: string;
+  context?: 'plan-approval' | 'question';
 }
 
 export type PermissionMode = 'default' | 'acceptEdits' | 'plan';
