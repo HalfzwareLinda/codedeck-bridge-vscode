@@ -53,6 +53,8 @@ export interface SessionProvider {
   getPermissionMode?: (sessionId: string) => string | undefined;
   /** Check if a tool_use_id already has a matching tool_result. */
   isToolResolved?: (sessionId: string, toolUseId: string) => boolean;
+  /** Register a session for watching (triggers pending watch if JSONL doesn't exist yet). */
+  watchSession?: (sessionId: string, cwd?: string) => void;
 }
 
 /**
@@ -123,6 +125,9 @@ export class BridgeCore {
         try {
           // Direct spawn: deterministic sessionId, immediate terminal mapping
           this.terminal.createSession(sessionId, this.workspaceCwd || undefined);
+
+          // Register pending watch so sessionWatcher picks up the JSONL as soon as it appears
+          this.sessionProvider?.watchSession?.(sessionId, this.workspaceCwd || undefined);
 
           // Publish session-pending so the phone creates a placeholder
           // (phone expects pending → ready sequence for its UI)
