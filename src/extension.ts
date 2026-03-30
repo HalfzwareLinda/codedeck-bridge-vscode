@@ -157,12 +157,14 @@ export function activate(context: vscode.ExtensionContext): void {
       // Cancel any existing timer for this tool (e.g. from a retry)
       const existing = pendingAutoApproveTimers.get(toolUseId);
       if (existing) clearTimeout(existing);
+      // Hold output flush briefly so tool_use + tool_result arrive together on phone
+      bridgeCore?.relay.setAutoApproveHoldoff(500);
       // Short delay gives Claude Code time to render the permission prompt
       // after writing tool_use to JSONL — avoids lost keypresses under load.
       const timer = setTimeout(() => {
         pendingAutoApproveTimers.delete(toolUseId);
         terminalRegistry.sendKeypress('1', sessionId);
-      }, 300);
+      }, 50);
       pendingAutoApproveTimers.set(toolUseId, timer);
     },
     onCancelAutoApprove: (toolUseId) => {

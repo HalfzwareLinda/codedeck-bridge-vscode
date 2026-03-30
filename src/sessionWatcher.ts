@@ -20,7 +20,7 @@ const MAX_TOTAL_HISTORY_ENTRIES = 10_000;
 /** Sessions with no output in this window are candidates for history eviction. */
 const HISTORY_EVICT_IDLE_MS = 30 * 60 * 1000; // 30 minutes
 /** If an auto-approve keypress hasn't been answered in this time, retry it. */
-const AUTO_APPROVE_STALE_MS = 3_000;
+const AUTO_APPROVE_STALE_MS = 1_500;
 /** Maximum number of keypress retries before giving up on a stale auto-approve. */
 const AUTO_APPROVE_MAX_RETRIES = 3;
 
@@ -267,6 +267,10 @@ export class SessionWatcher implements vscode.Disposable {
   /** Guard against concurrent readNewLines for the same file. */
   private readingFiles = new Set<string>();
   private autoApproveQueue = new AutoApproveQueue();
+  /** Fast-poll timers for specific JSONL files during active auto-approvals. */
+  private fastPollTimers: Map<string, NodeJS.Timeout> = new Map();
+  private static readonly FAST_POLL_INTERVAL_MS = 200;
+  private static readonly FAST_POLL_MAX_MS = 5_000;
   /** Tracks which tool_use_id caused the pause per session (plan_approval / ask_question). */
   private pausingToolUseIds: Map<string, string> = new Map();
   private emitDebounceTimer: NodeJS.Timeout | null = null;
@@ -321,7 +325,7 @@ export class SessionWatcher implements vscode.Disposable {
 
     // Standalone auto-approve retry — fires even when JSONL has no new content
     // (which is exactly when retries are needed: Claude is stuck on a permission prompt)
-    this.autoApproveRetryInterval = setInterval(() => this.retryStaleAutoApprovals(), 2000);
+    this.autoApproveRetryInterval = setInterval(() => this.retryStaleAutoApprovals(), 500);
 
     console.log(`[Codedeck] Watching ${this.claudeDir} for session changes`);
   }
@@ -847,6 +851,14 @@ export class SessionWatcher implements vscode.Disposable {
         this.events.onAutoApprovePermission?.(meta.sessionId, drainResult.next.toolUseId, drainResult.next.toolName);
       }
 
+      // Fast-poll this file while an auto-approve is in-flight — detects
+      // tool_result within ~200ms instead of waiting for the 2s general poll.
+      if (this.autoApproveQueue.getInflight(meta.sessionId)) {
+        this.startFastPoll(filePath, meta.sessionId);
+      } else {
+        this.stopFastPoll(filePath);
+      }
+
       const seqEntries: Array<{ seq: number; entry: OutputEntry }> = [];
       for (const entry of withPermissions) {
         const seq = (this.seqCounters.get(meta.sessionId) ?? 0) + 1;
@@ -1213,6 +1225,8 @@ export class SessionWatcher implements vscode.Disposable {
         if (immediate) {
           console.log(`[Codedeck] Auto-approving subagent ${toolName} for ${parentSessionId} (id=${toolUseId})`);
           this.events.onAutoApprovePermission?.(parentSessionId, toolUseId, toolName);
+          // Fast-poll this subagent file to detect tool_result quickly
+          this.startSubagentFastPoll(filePath, parentSessionId);
         } else {
           console.log(`[Codedeck] Auto-approve queued: subagent ${toolName} for ${parentSessionId} (id=${toolUseId})`);
         }
@@ -1234,6 +1248,20 @@ export class SessionWatcher implements vscode.Disposable {
       for (const id of batchResolvedIds) {
         resolved.add(id);
       }
+
+      // Immediately drain the parent queue — don't wait for the next parent
+      // JSONL read or stale retry. Without this, queued tools behind a subagent
+      // tool wait up to 3s (stale timer) before the next keypress fires.
+      const drainResult = this.autoApproveQueue.drain(parentSessionId, resolved);
+      if (drainResult.exhausted) {
+        const { toolUseId, toolName } = drainResult.exhausted;
+        console.log(`[Codedeck] Auto-approve exhausted after subagent drain for ${toolName} (id=${toolUseId}) — emitting fallback permission card`);
+        this.emitFallbackPermissionCard(parentSessionId, toolUseId, toolName);
+      }
+      if (drainResult.next) {
+        console.log(`[Codedeck] Auto-approve drained (subagent): ${drainResult.next.toolName} for ${parentSessionId} (id=${drainResult.next.toolUseId})`);
+        this.events.onAutoApprovePermission?.(parentSessionId, drainResult.next.toolUseId, drainResult.next.toolName);
+      }
     }
   }
 
@@ -1249,6 +1277,62 @@ export class SessionWatcher implements vscode.Disposable {
     }
     this.sessionsWithActiveSubagents.delete(sessionId);
     this.activeAgentToolIds.delete(sessionId);
+  }
+
+  /**
+   * Start polling a specific JSONL file at high frequency while an auto-approve
+   * is in-flight. Detects tool_result much faster than the 2s general poll.
+   * Self-cancels when the in-flight resolves or after FAST_POLL_MAX_MS.
+   */
+  private startFastPoll(filePath: string, sessionId: string): void {
+    // Already fast-polling this file
+    if (this.fastPollTimers.has(filePath)) { return; }
+
+    const startedAt = Date.now();
+    const timer = setInterval(() => {
+      // Stop if no longer in-flight or timed out
+      const inflight = this.autoApproveQueue.getInflight(sessionId);
+      if (!inflight || Date.now() - startedAt > SessionWatcher.FAST_POLL_MAX_MS) {
+        this.stopFastPoll(filePath);
+        return;
+      }
+      // Read new lines (this triggers drain if tool_result arrived)
+      if (this.fileOffsets.has(filePath)) {
+        this.readNewLines(filePath);
+      }
+    }, SessionWatcher.FAST_POLL_INTERVAL_MS);
+    this.fastPollTimers.set(filePath, timer);
+  }
+
+  /** Start fast-polling a subagent JSONL file during active auto-approval. */
+  private startSubagentFastPoll(filePath: string, parentSessionId: string): void {
+    if (this.fastPollTimers.has(filePath)) { return; }
+
+    const startedAt = Date.now();
+    const timer = setInterval(() => {
+      const inflight = this.autoApproveQueue.getInflight(parentSessionId);
+      if (!inflight || Date.now() - startedAt > SessionWatcher.FAST_POLL_MAX_MS) {
+        this.stopFastPoll(filePath);
+        return;
+      }
+      this.readSubagentNewLines(filePath);
+    }, SessionWatcher.FAST_POLL_INTERVAL_MS);
+    this.fastPollTimers.set(filePath, timer);
+  }
+
+  private stopFastPoll(filePath: string): void {
+    const timer = this.fastPollTimers.get(filePath);
+    if (timer) {
+      clearInterval(timer);
+      this.fastPollTimers.delete(filePath);
+    }
+  }
+
+  private stopAllFastPolls(): void {
+    for (const timer of this.fastPollTimers.values()) {
+      clearInterval(timer);
+    }
+    this.fastPollTimers.clear();
   }
 
   /** Remove sessionMeta entries for files that no longer exist on disk (Fix #13). */
@@ -1566,5 +1650,6 @@ export class SessionWatcher implements vscode.Disposable {
       clearTimeout(this.emitDebounceTimer);
       this.emitDebounceTimer = null;
     }
+    this.stopAllFastPolls();
   }
 }

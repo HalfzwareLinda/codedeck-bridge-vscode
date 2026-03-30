@@ -83,6 +83,10 @@ export class NostrRelay {
   // Pause output flushing while a high-priority publish is in progress.
   private outputPaused = false;
 
+  // --- Auto-approve holdoff ---
+  // Briefly hold output flush so tool_use + tool_result arrive together on the phone.
+  private autoApproveHoldoffUntil = 0;
+
   // --- Session list publish debounce ---
   // Coalesce rapid-fire publishSessionList calls (e.g. activation + oneose)
   private publishDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -433,6 +437,14 @@ export class NostrRelay {
     }
   }
 
+  /**
+   * Briefly hold output flush so auto-approved tool_use + tool_result arrive
+   * together on the phone, preventing orphan permission cards.
+   */
+  setAutoApproveHoldoff(durationMs: number): void {
+    this.autoApproveHoldoffUntil = Date.now() + durationMs;
+  }
+
   /** Flush queued output entries to relays. Skipped while high-priority publish is in progress. */
   private async flushOutputQueue(): Promise<void> {
     // Defer if a high-priority publish is in progress (give it relay bandwidth)
@@ -443,6 +455,18 @@ export class NostrRelay {
           this.outputFlushTimer = null;
           this.flushOutputQueue();
         }, NostrRelay.OUTPUT_FLUSH_INTERVAL_MS);
+      }
+      return;
+    }
+
+    // Hold off briefly during auto-approve — batches tool_use + tool_result together
+    if (Date.now() < this.autoApproveHoldoffUntil) {
+      const delay = this.autoApproveHoldoffUntil - Date.now();
+      if (this.outputQueue.length > 0 && !this.outputFlushTimer) {
+        this.outputFlushTimer = setTimeout(() => {
+          this.outputFlushTimer = null;
+          this.flushOutputQueue();
+        }, delay);
       }
       return;
     }
