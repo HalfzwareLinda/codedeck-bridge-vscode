@@ -80,6 +80,9 @@
 - [x] **Prevent mode desync after plan approval** — Fix switching immediately after approval (`b024614`, 2026-03-23)
 - [x] **CDB-005: Single auto-approve path with stale response guard** — Bridge is sole auto-approve authority. Shared `emitFallbackPermissionCard()` helper, split `getStaleInflight()` into pure query + mutations, `isToolResolved()` guard prevents phantom keypresses (`1b1c111`, 2026-03-29)
 - [x] **CDB-006: Centralize bypassPermissions mapping + event-driven mode verification** — Single `toTerminalMode()` helper replaces 3 scattered ternaries, fixes latent bug in `onSessionListChanged`. Replaced fragile 3s setTimeout verification with event-driven verification in `onPermissionModeObserved` (max 2 retries, 10s window) (`c05d741`, 2026-03-29)
+- [x] **CDB-007: Harden mode-confirmed** — No-op confirm, failure revert, plan approval, dedup bypass (`910df1f`, 2026-03-29)
+- [x] **CDB-008: Cancellable auto-approve keypresses** — Auto-approve keypresses are now cancellable and pause-aware (`dca57eb`, 2026-03-29)
+- [x] **CDB-009: Eliminate bypassPermissions mode** — Removed bypassPermissions entirely, use default + auto-approve (`b0e26dd`, 2026-03-29)
 
 ## Blossom Image Transfer (2026-03-04 — 2026-03-08)
 
