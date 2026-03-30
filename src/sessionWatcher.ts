@@ -200,6 +200,24 @@ class AutoApproveQueue {
     return this.inflight.get(sessionId);
   }
 
+  /** Remove the inflight item without waiting for resolution.
+   *  Used when Agent is accepted and subagent tools need the queue.
+   *  Returns the next queued item to fire (if any). */
+  evictInflight(sessionId: string): PendingAutoApprove | null {
+    this.inflight.delete(sessionId);
+    const q = this.queues.get(sessionId);
+    if (!q || q.length === 0) { return null; }
+    const next = q.shift()!;
+    if (q.length === 0) { this.queues.delete(sessionId); }
+    this.inflight.set(sessionId, {
+      toolUseId: next.toolUseId,
+      toolName: next.toolName,
+      inflightSince: Date.now(),
+      retryCount: 0,
+    });
+    return next;
+  }
+
   clear(sessionId: string): void {
     this.queues.delete(sessionId);
     this.inflight.delete(sessionId);
@@ -253,10 +271,18 @@ export class SessionWatcher implements vscode.Disposable {
   private pausingToolUseIds: Map<string, string> = new Map();
   private emitDebounceTimer: NodeJS.Timeout | null = null;
   private pollCount = 0;
-  private static readonly PENDING_WATCH_POLL_EVERY_N = 3; // check pending watches every 3rd poll (every 6s)
+  private static readonly PENDING_WATCH_POLL_EVERY_N = 1; // check pending watches every poll (every 2s)
   /** Sessions where terminal exists but JSONL hasn't appeared yet. */
   private pendingSessionWatches: Map<string, { cwd?: string; registeredAt: number }> = new Map();
   private static readonly PENDING_WATCH_TIMEOUT_MS = 60_000;
+  /** Byte offsets for subagent JSONL files (tail-f tracking). */
+  private subagentOffsets: Map<string, number> = new Map();
+  /** Maps subagent file path → parent sessionId. */
+  private subagentParentMap: Map<string, string> = new Map();
+  /** Tracks sessions that have active subagent files (suppresses parent Agent retries). */
+  private sessionsWithActiveSubagents: Set<string> = new Set();
+  /** Maps sessionId → set of Agent tool_use_ids that have active sub-agents. */
+  private activeAgentToolIds: Map<string, Set<string>> = new Map();
   /**
    * Callback to check if a newly created JSONL should be accepted.
    * Returns true if an unresolved terminal matches (temporal proximity + cwd).
@@ -435,6 +461,7 @@ export class SessionWatcher implements vscode.Disposable {
     this.lastOutputTime.delete(sessionId);
     this.autoApproveQueue.clear(sessionId);
     this.pausingToolUseIds.delete(sessionId);
+    this.cleanupSubagents(sessionId);
 
     console.log(`[Codedeck] unwatchSession: stopped watching ${sessionId}`);
     this.emitSessionList();
@@ -455,6 +482,19 @@ export class SessionWatcher implements vscode.Disposable {
         } catch { /* not in this dir */ }
       }
     } catch { /* claudeDir doesn't exist */ }
+    return null;
+  }
+
+  /**
+   * Extract parent sessionId from a subagent JSONL path.
+   * Path structure: .../<session-uuid>/subagents/<agent-hash>.jsonl
+   */
+  private extractParentSessionFromSubagentPath(filePath: string): string | null {
+    const parts = filePath.split(path.sep);
+    const subIdx = parts.indexOf('subagents');
+    if (subIdx > 0) {
+      return parts[subIdx - 1]; // the session UUID directory name
+    }
     return null;
   }
 
@@ -577,7 +617,10 @@ export class SessionWatcher implements vscode.Disposable {
 
   private onFileCreated(filePath: string): void {
     if (!filePath.endsWith('.jsonl')) { return; }
-    if (filePath.includes('/subagents/')) { return; }
+    if (filePath.includes('/subagents/')) {
+      this.startWatchingSubagent(filePath);
+      return;
+    }
     // Already watching this file
     if (this.fileOffsets.has(filePath)) { return; }
 
@@ -615,7 +658,10 @@ export class SessionWatcher implements vscode.Disposable {
 
   private onFileChanged(filePath: string): void {
     if (!filePath.endsWith('.jsonl')) { return; }
-    if (filePath.includes('/subagents/')) { return; }
+    if (filePath.includes('/subagents/')) {
+      this.readSubagentNewLines(filePath);
+      return;
+    }
     // Only process files we're actively watching
     if (!this.fileOffsets.has(filePath)) { return; }
 
@@ -630,6 +676,7 @@ export class SessionWatcher implements vscode.Disposable {
       this.seqCounters.delete(meta.sessionId);
       this.autoApproveQueue.clear(meta.sessionId);
       this.pausingToolUseIds.delete(meta.sessionId);
+      this.cleanupSubagents(meta.sessionId);
     }
     this.sessionMeta.delete(filePath);
     this.emitSessionList();
@@ -759,7 +806,8 @@ export class SessionWatcher implements vscode.Disposable {
       const withPermissions = this.injectPermissionRequests(batchEntries, resolved, meta.sessionId, currentMode);
 
       // NOW update resolvedToolIds with this batch's tool_results (for future batches)
-      // Also resume auto-approve if the pausing tool (plan/question) has resolved.
+      // Also resume auto-approve if the pausing tool (plan/question) has resolved,
+      // and track Agent completion for subagent lifecycle.
       for (const entry of batchEntries) {
         if (entry.entryType === 'tool_result') {
           const id = entry.metadata?.tool_use_id as string | undefined;
@@ -770,6 +818,16 @@ export class SessionWatcher implements vscode.Disposable {
               console.log(`[Codedeck] Resuming auto-approve for ${meta.sessionId}: pausing tool resolved (id=${id})`);
               this.autoApproveQueue.resume(meta.sessionId);
               this.pausingToolUseIds.delete(meta.sessionId);
+            }
+            // Check if a tracked Agent completed (sub-agent finished)
+            const activeIds = this.activeAgentToolIds.get(meta.sessionId);
+            if (activeIds?.has(id)) {
+              activeIds.delete(id);
+              if (activeIds.size === 0) {
+                this.activeAgentToolIds.delete(meta.sessionId);
+                this.sessionsWithActiveSubagents.delete(meta.sessionId);
+                console.log(`[Codedeck] All subagents completed for ${meta.sessionId}`);
+              }
             }
           }
         }
@@ -1032,6 +1090,167 @@ export class SessionWatcher implements vscode.Disposable {
     }
   }
 
+  // --- Subagent file watching ---
+
+  /**
+   * Start tracking a subagent JSONL file for permission-needing tool calls.
+   * Does NOT emit output to the phone — only auto-approves or emits permission cards.
+   */
+  private startWatchingSubagent(filePath: string): void {
+    if (this.subagentOffsets.has(filePath)) { return; }
+
+    const parentSessionId = this.extractParentSessionFromSubagentPath(filePath);
+    if (!parentSessionId) { return; }
+
+    // Only watch if we're tracking the parent session
+    let parentWatched = false;
+    for (const meta of this.sessionMeta.values()) {
+      if (meta.sessionId === parentSessionId) { parentWatched = true; break; }
+    }
+    if (!parentWatched) { return; }
+
+    this.subagentOffsets.set(filePath, 0);
+    this.subagentParentMap.set(filePath, parentSessionId);
+    this.sessionsWithActiveSubagents.add(parentSessionId);
+
+    // Track which Agent tool spawned this subagent and evict it from inflight.
+    // The Agent keypress was already accepted — it shouldn't occupy the queue.
+    const inflight = this.autoApproveQueue.getInflight(parentSessionId);
+    if (inflight?.toolName === 'Agent') {
+      let ids = this.activeAgentToolIds.get(parentSessionId);
+      if (!ids) { ids = new Set(); this.activeAgentToolIds.set(parentSessionId, ids); }
+      ids.add(inflight.toolUseId);
+
+      const next = this.autoApproveQueue.evictInflight(parentSessionId);
+      console.log(`[Codedeck] Watching subagent file for ${parentSessionId}: ${path.basename(filePath)} — evicted Agent (id=${inflight.toolUseId})`);
+      if (next) {
+        console.log(`[Codedeck] Promoted ${next.toolName} after Agent eviction (id=${next.toolUseId})`);
+        this.events.onAutoApprovePermission?.(parentSessionId, next.toolUseId, next.toolName);
+      }
+    } else {
+      console.log(`[Codedeck] Watching subagent file for ${parentSessionId}: ${path.basename(filePath)}`);
+    }
+
+    // Immediately read any existing content
+    this.readSubagentNewLines(filePath);
+  }
+
+  /**
+   * Read new lines from a subagent JSONL file, looking for tool_use entries
+   * that need permission. Auto-approves or emits permission cards on the parent session.
+   */
+  private readSubagentNewLines(filePath: string): void {
+    const parentSessionId = this.subagentParentMap.get(filePath);
+    if (!parentSessionId) {
+      // Not yet tracked — try to start watching
+      this.startWatchingSubagent(filePath);
+      return;
+    }
+
+    let fd: number;
+    try {
+      fd = fs.openSync(filePath, 'r');
+    } catch {
+      return; // File gone — will be cleaned up by poll
+    }
+
+    let chunk: string;
+    try {
+      const stat = fs.fstatSync(fd);
+      const offset = this.subagentOffsets.get(filePath) ?? 0;
+      if (stat.size <= offset) { return; }
+
+      const newSize = stat.size - offset;
+      const buf = Buffer.alloc(newSize);
+      fs.readSync(fd, buf, 0, newSize, offset);
+      this.subagentOffsets.set(filePath, stat.size);
+      chunk = buf.toString('utf8');
+    } finally {
+      fs.closeSync(fd);
+    }
+
+    if (!chunk) { return; }
+    const lines = chunk.split('\n');
+
+    // Collect tool_use and tool_result entries in this batch
+    const batchToolUses: Array<{ toolName: string; toolUseId: string }> = [];
+    const batchResolvedIds = new Set<string>();
+
+    for (const line of lines) {
+      if (!line.trim()) { continue; }
+      const entries = parseJsonlLine(line);
+      for (const entry of entries) {
+        if (entry.entryType === 'tool_result') {
+          const id = entry.metadata?.tool_use_id as string | undefined;
+          if (id) { batchResolvedIds.add(id); }
+        }
+        if (entry.entryType === 'tool_use') {
+          const toolName = (entry.metadata?.tool_name as string) ?? '';
+          const toolUseId = (entry.metadata?.tool_use_id as string) ?? '';
+          if (toolName && toolUseId) {
+            batchToolUses.push({ toolName, toolUseId });
+          }
+        }
+      }
+    }
+
+    // Process tool_use entries that need permission and aren't resolved in this batch
+    const currentMode = this.events.getTrackedMode?.(parentSessionId)
+      ?? this.permissionModes.get(parentSessionId)
+      ?? 'default';
+
+    for (const { toolName, toolUseId } of batchToolUses) {
+      if (!toolNeedsPermission(toolName)) { continue; }
+      if (batchResolvedIds.has(toolUseId)) { continue; }
+
+      // Auto-approve in default mode or plan mode with whitelisted tool
+      const shouldAutoApprove =
+        currentMode === 'default' ||
+        (currentMode === 'plan' && shouldAutoApproveInPlanMode(toolName));
+
+      if (shouldAutoApprove) {
+        const { immediate } = this.autoApproveQueue.enqueue(parentSessionId, toolUseId, toolName);
+        if (immediate) {
+          console.log(`[Codedeck] Auto-approving subagent ${toolName} for ${parentSessionId} (id=${toolUseId})`);
+          this.events.onAutoApprovePermission?.(parentSessionId, toolUseId, toolName);
+        } else {
+          console.log(`[Codedeck] Auto-approve queued: subagent ${toolName} for ${parentSessionId} (id=${toolUseId})`);
+        }
+      } else {
+        // Not auto-approvable — emit a permission card to the phone
+        console.log(`[Codedeck] Subagent ${toolName} needs permission for ${parentSessionId} (id=${toolUseId})`);
+        this.emitFallbackPermissionCard(parentSessionId, toolUseId, toolName);
+      }
+    }
+
+    // Feed subagent tool_result IDs into the parent's resolvedToolIds so that
+    // drain() in readNewLines can see that subagent tools have resolved.
+    if (batchResolvedIds.size > 0) {
+      let resolved = this.resolvedToolIds.get(parentSessionId);
+      if (!resolved) {
+        resolved = new Set();
+        this.resolvedToolIds.set(parentSessionId, resolved);
+      }
+      for (const id of batchResolvedIds) {
+        resolved.add(id);
+      }
+    }
+  }
+
+  /**
+   * Clean up subagent tracking for a parent session.
+   */
+  private cleanupSubagents(sessionId: string): void {
+    for (const [filePath, parentId] of this.subagentParentMap) {
+      if (parentId === sessionId) {
+        this.subagentOffsets.delete(filePath);
+        this.subagentParentMap.delete(filePath);
+      }
+    }
+    this.sessionsWithActiveSubagents.delete(sessionId);
+    this.activeAgentToolIds.delete(sessionId);
+  }
+
   /** Remove sessionMeta entries for files that no longer exist on disk (Fix #13). */
   private pruneDeletedSessions(): void {
     for (const filePath of [...this.sessionMeta.keys()]) {
@@ -1096,6 +1315,31 @@ export class SessionWatcher implements vscode.Disposable {
         this.emitSessionList();
       }
     }
+
+    // Poll subagent files for new content
+    for (const filePath of [...this.subagentOffsets.keys()]) {
+      try {
+        const stat = fs.statSync(filePath);
+        const offset = this.subagentOffsets.get(filePath) ?? 0;
+        if (stat.size > offset) {
+          this.readSubagentNewLines(filePath);
+        }
+      } catch {
+        // Subagent file deleted — clean up
+        const parentId = this.subagentParentMap.get(filePath);
+        this.subagentOffsets.delete(filePath);
+        this.subagentParentMap.delete(filePath);
+        // Check if parent still has other subagent files
+        if (parentId) {
+          let hasOther = false;
+          for (const pid of this.subagentParentMap.values()) {
+            if (pid === parentId) { hasOther = true; break; }
+          }
+          if (!hasOther) { this.sessionsWithActiveSubagents.delete(parentId); }
+        }
+      }
+    }
+
   }
 
   /**
@@ -1298,6 +1542,10 @@ export class SessionWatcher implements vscode.Disposable {
 
   dispose(): void {
     this.autoApproveQueue.clearAll();
+    this.subagentOffsets.clear();
+    this.subagentParentMap.clear();
+    this.sessionsWithActiveSubagents.clear();
+    this.activeAgentToolIds.clear();
     if (this.watcher) {
       this.watcher.dispose();
       this.watcher = null;
