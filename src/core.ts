@@ -194,11 +194,14 @@ export class BridgeCore {
         // Claude Code exits plan mode immediately on approval, but the JSONL
         // permissionMode field only appears on the next user entry. Without
         // preemptive tracking, subsequent mode switches calculate wrong Shift+Tab deltas.
+        let planApprovalMode: string | undefined;
+
         if (this.trackedModes.get(sessionId) === 'plan') {
           switch (key) {
             case '1': {
               // Clear context & auto-accept → new session spawns with acceptEdits
               this.trackedModes.set(sessionId, 'acceptEdits');
+              planApprovalMode = 'acceptEdits';
               const sessions = this.sessionProvider?.getSessions() ?? [];
               const session = sessions.find(s => s.id === sessionId);
               const cwd = session?.cwd || this.workspaceCwd;
@@ -209,11 +212,13 @@ export class BridgeCore {
             case '2':
               // Approve (auto-accept edits)
               this.trackedModes.set(sessionId, 'acceptEdits');
+              planApprovalMode = 'acceptEdits';
               this.log(`[Codedeck] Plan option 2 — tracked mode → acceptEdits for ${sessionId}`);
               break;
             case '3':
               // Approve (manual edits)
               this.trackedModes.set(sessionId, 'default');
+              planApprovalMode = 'default';
               this.log(`[Codedeck] Plan option 3 — tracked mode → default for ${sessionId}`);
               break;
             case '4':
@@ -242,6 +247,15 @@ export class BridgeCore {
             console.error('[Codedeck] Failed to publish input-failed:', err);
           });
         }
+
+        // Publish mode-confirmed after successful plan approval delivery
+        if (sent && planApprovalMode !== undefined) {
+          const phoneMode = this.bypassSessions.has(sessionId) && planApprovalMode === 'default'
+            ? 'bypassPermissions' : planApprovalMode;
+          this.relay.publishModeConfirmed(sessionId, phoneMode).catch(err => {
+            this.log(`[Codedeck] Failed to publish mode-confirmed: ${err}`);
+          });
+        }
       },
       onModeChange: (sessionId, mode) => {
         this.log(`[Codedeck] Mode change for session ${sessionId}: ${mode}`);
@@ -253,12 +267,9 @@ export class BridgeCore {
           if (mode === 'bypassPermissions') {
             this.bypassSessions.add(sessionId);
             this.log(`[Codedeck] Bypass mode enabled for ${sessionId} (auto-approve all)`);
-            // Cycle terminal to 'default' — bypass uses default's position + auto-approve
-            this.applyModeChange(sessionId, 'default').then(() => {
-              this.relay.publishModeConfirmed(sessionId, 'bypassPermissions').catch(err => {
-                this.log(`[Codedeck] Failed to publish mode-confirmed: ${err}`);
-              });
-            }).catch(err => {
+            // Cycle terminal to 'default' — bypass uses default's position + auto-approve.
+            // doModeSwitch handles mode-confirmed (sees bypassSessions.has → publishes 'bypassPermissions').
+            this.applyModeChange(sessionId, 'default').catch(err => {
               console.error('[Codedeck] Mode change failed:', err);
             });
             return;
@@ -469,12 +480,19 @@ export class BridgeCore {
     const currentTracked = this.trackedModes.get(sessionId) ?? 'default';
     if (currentTracked === targetMode) {
       this.log(`[Codedeck] Already in ${targetMode} mode for ${sessionId}`);
+      // Still confirm to the phone — it may be out of sync and sent this request to re-synchronize.
+      const phoneMode = this.bypassSessions.has(sessionId) && targetMode === 'default'
+        ? 'bypassPermissions' : targetMode;
+      this.relay.publishModeConfirmed(sessionId, phoneMode).catch(err => {
+        this.log(`[Codedeck] Failed to publish mode-confirmed: ${err}`);
+      });
       return;
     }
 
     if (signal?.aborted) { return; }
-    const sent = await this.sendShiftTabs(sessionId, currentTracked, targetMode, signal);
-    if (sent) {
+    const result = await this.sendShiftTabs(sessionId, currentTracked, targetMode, signal);
+
+    if (result === 'sent') {
       this.trackedModes.set(sessionId, targetMode);
       this.log(`[Codedeck] Mode optimistically tracked as ${targetMode} for ${sessionId}`);
 
@@ -497,35 +515,45 @@ export class BridgeCore {
         timestamp: Date.now(),
         retryCount,
       });
+    } else if (result === 'failed') {
+      // Terminal gone or Shift+Tab delivery failed. Tell the phone where we actually are
+      // so it can revert its optimistic state. Verification timer handles partial-delivery drift.
+      const phoneMode = this.bypassSessions.has(sessionId) && currentTracked === 'default'
+        ? 'bypassPermissions' : currentTracked;
+      this.log(`[Codedeck] Mode switch failed for ${sessionId} — confirming current: ${phoneMode}`);
+      this.relay.publishModeConfirmed(sessionId, phoneMode).catch(err => {
+        this.log(`[Codedeck] Failed to publish mode-confirmed (failure): ${err}`);
+      });
     }
+    // 'aborted' → do nothing. The superseding request will publish its own confirmation.
   }
 
   /** Send the calculated number of Shift+Tab presses to go from fromMode to toMode. */
-  private async sendShiftTabs(sessionId: string, fromMode: string, toMode: string, signal?: AbortSignal): Promise<boolean> {
+  private async sendShiftTabs(sessionId: string, fromMode: string, toMode: string, signal?: AbortSignal): Promise<'sent' | 'failed' | 'aborted'> {
     const cycle = BridgeCore.MODE_CYCLE;
     const fromIndex = Math.max(0, cycle.indexOf(fromMode));
     const toIndex = cycle.indexOf(toMode);
     const steps = (toIndex - fromIndex + cycle.length) % cycle.length;
 
-    if (steps === 0) { return true; }
+    if (steps === 0) { return 'sent'; }
 
     this.log(`[Codedeck] Sending ${steps} Shift+Tab(s) for ${sessionId}: ${fromMode} → ${toMode}`);
 
     for (let i = 0; i < steps; i++) {
       if (signal?.aborted) {
         this.log(`[Codedeck] Mode switch aborted for ${sessionId} at step ${i + 1}/${steps}`);
-        return false;
+        return 'aborted';
       }
       const sent = await this.terminal.sendShiftTab(sessionId);
       if (!sent) {
         this.log(`[Codedeck] Failed to send Shift+Tab for ${sessionId} (step ${i + 1}/${steps})`);
-        return false;
+        return 'failed';
       }
       if (i < steps - 1) {
         await new Promise(resolve => setTimeout(resolve, BridgeCore.SHIFT_TAB_DELAY_MS));
       }
     }
-    return true;
+    return 'sent';
   }
 
   /** Called when new output is detected from session files. */
