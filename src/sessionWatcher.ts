@@ -59,12 +59,21 @@ class AutoApproveQueue {
   private queues: Map<string, PendingAutoApprove[]> = new Map();
   /** The tool we sent a keypress for and are waiting to see resolved. */
   private inflight: Map<string, { toolUseId: string; toolName: string; inflightSince: number; retryCount: number }> = new Map();
+  /** Sessions where auto-approve is paused (plan_approval / ask_question showing). */
+  private paused: Set<string> = new Set();
 
   /**
    * Add a tool to the queue. Returns `{ immediate: true }` if nothing is
    * in-flight and the caller should fire the keypress now.
    */
   enqueue(sessionId: string, toolUseId: string, toolName: string): { immediate: boolean } {
+    // When paused (plan/question showing), always queue — never fire immediately
+    if (this.paused.has(sessionId)) {
+      let q = this.queues.get(sessionId);
+      if (!q) { q = []; this.queues.set(sessionId, q); }
+      q.push({ toolUseId, toolName, enqueuedAt: Date.now() });
+      return { immediate: false };
+    }
     if (!this.inflight.has(sessionId)) {
       this.inflight.set(sessionId, { toolUseId, toolName, inflightSince: Date.now(), retryCount: 0 });
       return { immediate: true };
@@ -130,6 +139,7 @@ class AutoApproveQueue {
     const retryable: StaleReport['retryable'] = [];
     const exhausted: StaleReport['exhausted'] = [];
     for (const [sessionId, inf] of this.inflight) {
+      if (this.paused.has(sessionId)) continue;
       if (Date.now() - inf.inflightSince > AUTO_APPROVE_STALE_MS) {
         if (inf.retryCount < AUTO_APPROVE_MAX_RETRIES) {
           retryable.push({ sessionId, toolUseId: inf.toolUseId, toolName: inf.toolName });
@@ -168,14 +178,32 @@ class AutoApproveQueue {
     return promoted;
   }
 
+  pause(sessionId: string): void {
+    this.paused.add(sessionId);
+  }
+
+  resume(sessionId: string): void {
+    this.paused.delete(sessionId);
+  }
+
+  isPaused(sessionId: string): boolean {
+    return this.paused.has(sessionId);
+  }
+
+  getInflight(sessionId: string): { toolUseId: string; toolName: string } | undefined {
+    return this.inflight.get(sessionId);
+  }
+
   clear(sessionId: string): void {
     this.queues.delete(sessionId);
     this.inflight.delete(sessionId);
+    this.paused.delete(sessionId);
   }
 
   clearAll(): void {
     this.queues.clear();
     this.inflight.clear();
+    this.paused.clear();
   }
 }
 
@@ -188,6 +216,8 @@ export interface SessionWatcherEvents {
   onPermissionModeChanged?: (sessionId: string, mode: string) => void;
   /** Fired when a tool permission should be auto-approved (e.g. read-only tools in plan mode, or bypass mode). */
   onAutoApprovePermission?: (sessionId: string, toolUseId: string, toolName: string) => void;
+  /** Fired when a pending auto-approve keypress should be cancelled (e.g. plan/question menu detected). */
+  onCancelAutoApprove?: (toolUseId: string) => void;
   /** Check if a session is in phone-side bypass mode (auto-approve all permission prompts). */
   isBypassSession?: (sessionId: string) => boolean;
   /** Get the bridge's authoritative tracked mode (set optimistically on mode change). */
@@ -216,6 +246,8 @@ export class SessionWatcher implements vscode.Disposable {
   /** Guard against concurrent readNewLines for the same file. */
   private readingFiles = new Set<string>();
   private autoApproveQueue = new AutoApproveQueue();
+  /** Tracks which tool_use_id caused the pause per session (plan_approval / ask_question). */
+  private pausingToolUseIds: Map<string, string> = new Map();
   private emitDebounceTimer: NodeJS.Timeout | null = null;
   private pollCount = 0;
   private static readonly NEW_FILE_SCAN_EVERY_N_POLLS = 3; // scan for new files every 3rd poll (every 6s)
@@ -504,6 +536,7 @@ export class SessionWatcher implements vscode.Disposable {
       this.sessionHistory.delete(meta.sessionId);
       this.seqCounters.delete(meta.sessionId);
       this.autoApproveQueue.clear(meta.sessionId);
+      this.pausingToolUseIds.delete(meta.sessionId);
     }
     this.sessionMeta.delete(filePath);
     this.emitSessionList();
@@ -599,6 +632,24 @@ export class SessionWatcher implements vscode.Disposable {
         batchEntries.push(...entries);
       }
 
+      // Pause auto-approve if a plan_approval or ask_question is detected in this batch.
+      // The keypress would hit the wrong prompt if we fire it while a plan/question menu is showing.
+      for (const entry of batchEntries) {
+        if ((entry.metadata?.special === 'plan_approval' || entry.metadata?.special === 'ask_question')
+            && entry.metadata?.tool_use_id) {
+          const toolUseId = entry.metadata.tool_use_id as string;
+          console.log(`[Codedeck] Pausing auto-approve for ${meta.sessionId}: ${entry.metadata.special} (id=${toolUseId})`);
+          this.autoApproveQueue.pause(meta.sessionId);
+          this.pausingToolUseIds.set(meta.sessionId, toolUseId);
+          // Cancel any pending 300ms timer for the inflight tool — it would hit the wrong prompt
+          const inflight = this.autoApproveQueue.getInflight(meta.sessionId);
+          if (inflight) {
+            this.events.onCancelAutoApprove?.(inflight.toolUseId);
+          }
+          break;
+        }
+      }
+
       // Ensure persistent resolvedToolIds set exists for this session
       let resolved = this.resolvedToolIds.get(meta.sessionId);
       if (!resolved) {
@@ -615,10 +666,19 @@ export class SessionWatcher implements vscode.Disposable {
       const withPermissions = this.injectPermissionRequests(batchEntries, resolved, meta.sessionId, currentMode);
 
       // NOW update resolvedToolIds with this batch's tool_results (for future batches)
+      // Also resume auto-approve if the pausing tool (plan/question) has resolved.
       for (const entry of batchEntries) {
         if (entry.entryType === 'tool_result') {
           const id = entry.metadata?.tool_use_id as string | undefined;
-          if (id) { resolved.add(id); }
+          if (id) {
+            resolved.add(id);
+            const pausingId = this.pausingToolUseIds.get(meta.sessionId);
+            if (pausingId && pausingId === id) {
+              console.log(`[Codedeck] Resuming auto-approve for ${meta.sessionId}: pausing tool resolved (id=${id})`);
+              this.autoApproveQueue.resume(meta.sessionId);
+              this.pausingToolUseIds.delete(meta.sessionId);
+            }
+          }
         }
       }
 

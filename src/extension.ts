@@ -131,6 +131,9 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   });
 
+  // --- Tracked auto-approve timers (cancellable by toolUseId) ---
+  const pendingAutoApproveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
   // --- Session watcher (VSCode FileSystemWatcher) ---
   sessionWatcher = new SessionWatcher({
     onOutput: (sessionId, entries) => {
@@ -150,11 +153,26 @@ export function activate(context: vscode.ExtensionContext): void {
     onPermissionModeChanged: (sessionId, mode) => {
       bridgeCore?.onPermissionModeObserved(sessionId, mode);
     },
-    onAutoApprovePermission: (sessionId, _toolUseId, toolName) => {
-      log(`[Codedeck] Auto-approving ${toolName} for ${sessionId}`);
+    onAutoApprovePermission: (sessionId, toolUseId, toolName) => {
+      log(`[Codedeck] Auto-approving ${toolName} for ${sessionId} (id=${toolUseId})`);
+      // Cancel any existing timer for this tool (e.g. from a retry)
+      const existing = pendingAutoApproveTimers.get(toolUseId);
+      if (existing) clearTimeout(existing);
       // Short delay gives Claude Code time to render the permission prompt
       // after writing tool_use to JSONL — avoids lost keypresses under load.
-      setTimeout(() => terminalRegistry.sendKeypress('1', sessionId), 300);
+      const timer = setTimeout(() => {
+        pendingAutoApproveTimers.delete(toolUseId);
+        terminalRegistry.sendKeypress('1', sessionId);
+      }, 300);
+      pendingAutoApproveTimers.set(toolUseId, timer);
+    },
+    onCancelAutoApprove: (toolUseId) => {
+      const timer = pendingAutoApproveTimers.get(toolUseId);
+      if (timer) {
+        clearTimeout(timer);
+        pendingAutoApproveTimers.delete(toolUseId);
+        log(`[Codedeck] Cancelled pending auto-approve for ${toolUseId}`);
+      }
     },
     isBypassSession: (sessionId) => bridgeCore?.isBypassSession(sessionId) ?? false,
     getTrackedMode: (sessionId) => bridgeCore?.getTrackedMode(sessionId),
