@@ -76,9 +76,11 @@ export function activate(context: vscode.ExtensionContext): void {
     });
   };
 
-  /** Enrich sessions with terminal availability before publishing. */
+  /** Filter to sessions with a live terminal and enrich with terminal status. */
   const enrichWithTerminalStatus = (sessions: RemoteSessionInfo[]) =>
-    sessions.map(s => ({ ...s, hasTerminal: terminalRegistry.hasTerminal(s.id) }));
+    sessions
+      .filter(s => terminalRegistry.hasTerminal(s.id))
+      .map(s => ({ ...s, hasTerminal: true }));
 
   // --- Core bridge (pure Node.js logic) ---
   const workspaceCwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -147,9 +149,6 @@ export function activate(context: vscode.ExtensionContext): void {
       terminalRegistry.onNewSession(sessionId, cwd);
       bridgeCore?.onNewSession(sessionId, cwd);
     },
-    onExistingSession: (sessionId, cwd) => {
-      terminalRegistry.mapExistingSession(sessionId, cwd);
-    },
     onPermissionModeChanged: (sessionId, mode) => {
       bridgeCore?.onPermissionModeObserved(sessionId, mode);
     },
@@ -177,7 +176,63 @@ export function activate(context: vscode.ExtensionContext): void {
     getTrackedMode: (sessionId) => bridgeCore?.getTrackedMode(sessionId),
   }, workspaceCwd);
   context.subscriptions.push(sessionWatcher);
+
+  // --- Terminal-first wiring ---
+  // When a phone-spawned terminal is discovered (slug in name), find its JSONL and start watching
+  terminalRegistry.onTerminalDiscovered = (slug, terminal) => {
+    log(`[Codedeck] Terminal discovered with slug: ${slug}`);
+    const sessionId = sessionWatcher!.findSessionBySlug(slug);
+    if (sessionId) {
+      log(`[Codedeck] Resolved slug ${slug} → ${sessionId}`);
+      terminalRegistry.resolveTerminal(sessionId, terminal);
+      sessionWatcher!.watchSession(sessionId);
+    } else {
+      log(`[Codedeck] No JSONL found for slug ${slug} — terminal will resolve when JSONL appears`);
+    }
+  };
+
+  // When a mapped terminal closes, stop watching its session
+  terminalRegistry.onTerminalClosed = (sessionId) => {
+    log(`[Codedeck] Terminal closed for session ${sessionId}`);
+    sessionWatcher!.unwatchSession(sessionId);
+    const sessions = sessionWatcher!.getSessions();
+    bridgeCore?.onSessionListChanged(enrichWithTerminalStatus(sessions));
+  };
+
+  // When a new JSONL appears, check if an unresolved terminal matches
+  sessionWatcher.shouldAcceptNewFile = (sessionId, cwd) => {
+    const unresolved = terminalRegistry.getUnresolvedTerminals();
+    if (unresolved.length === 0) { return false; }
+
+    const now = Date.now();
+    // Temporal proximity: match terminals opened in the last 30 seconds
+    const candidates = unresolved.filter(u => (now - u.openedAt) < 30_000);
+    if (candidates.length === 0) { return false; }
+
+    let matched: typeof candidates[0] | null = null;
+    if (candidates.length === 1) {
+      matched = candidates[0];
+    } else {
+      // Multiple candidates: match by cwd basename in terminal name
+      const cwdBasename = cwd.split('/').pop() || '';
+      if (cwdBasename) {
+        matched = candidates.find(c => c.terminal.name.includes(cwdBasename)) ?? null;
+      }
+    }
+
+    if (matched) {
+      log(`[Codedeck] Resolved unresolved terminal for session ${sessionId}`);
+      terminalRegistry.resolveTerminal(sessionId, matched.terminal);
+      return true;
+    }
+    return false;
+  };
+
+  // Start the file watcher (no initial scan — terminals drive session discovery)
   sessionWatcher.start();
+
+  // Scan existing terminals for extension reload recovery
+  terminalRegistry.scanExistingTerminals();
 
   // Wire session provider into core for history requests
   bridgeCore.setSessionProvider(sessionWatcher);

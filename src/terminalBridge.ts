@@ -63,6 +63,13 @@ export class TerminalRegistry implements vscode.Disposable {
   private flushingSession: Set<string> = new Set();
   /** Callback fired when queued input expires without being delivered. */
   onInputExpired?: (sessionId: string) => void;
+  /** Callback fired when a Claude terminal with a slug is discovered (phone-spawned or reload recovery). */
+  onTerminalDiscovered?: (slug: string, terminal: vscode.Terminal) => void;
+  /** Callback fired when a mapped terminal closes. */
+  onTerminalClosed?: (sessionId: string) => void;
+
+  /** Claude terminals that don't have a sessionId mapping yet (manually opened). */
+  private unresolvedTerminals: Map<vscode.Terminal, { openedAt: number }> = new Map();
 
   constructor() {
     this.disposables.push(
@@ -72,16 +79,27 @@ export class TerminalRegistry implements vscode.Disposable {
           // Keep only last 30 seconds of recent terminals
           const cutoff = Date.now() - 30_000;
           this.recentTerminals = this.recentTerminals.filter(r => r.openedAt > cutoff);
+
+          // Terminal-first: classify as phone-spawned (has slug) or manual (unresolved)
+          const slug = this.extractSlugFromName(terminal.name);
+          if (slug) {
+            this.onTerminalDiscovered?.(slug, terminal);
+          } else {
+            this.unresolvedTerminals.set(terminal, { openedAt: Date.now() });
+          }
         }
       }),
       vscode.window.onDidCloseTerminal(terminal => {
-        // Remove from session mapping
+        // Remove from session mapping and fire callback
         for (const [sessionId, t] of this.sessionTerminals) {
           if (t === terminal) {
             this.sessionTerminals.delete(sessionId);
+            this.onTerminalClosed?.(sessionId);
             break;
           }
         }
+        // Remove from unresolved
+        this.unresolvedTerminals.delete(terminal);
         // Remove from recent
         this.recentTerminals = this.recentTerminals.filter(r => r.terminal !== terminal);
         // Clean up any pending shell integration listeners
@@ -92,6 +110,56 @@ export class TerminalRegistry implements vscode.Disposable {
         }
       }),
     );
+  }
+
+  /**
+   * Scan existing terminals at startup for extension reload recovery.
+   * Phone-spawned terminals have slug in name → fire onTerminalDiscovered.
+   * Manual terminals → add to unresolvedTerminals.
+   */
+  scanExistingTerminals(): void {
+    for (const terminal of vscode.window.terminals) {
+      if (!this.isClaudeTerminal(terminal)) { continue; }
+      if (terminal.exitStatus !== undefined) { continue; }
+
+      // Check if already mapped (e.g. from createSession earlier this activation)
+      let alreadyMapped = false;
+      for (const t of this.sessionTerminals.values()) {
+        if (t === terminal) { alreadyMapped = true; break; }
+      }
+      if (alreadyMapped) { continue; }
+
+      const slug = this.extractSlugFromName(terminal.name);
+      if (slug) {
+        this.onTerminalDiscovered?.(slug, terminal);
+      } else {
+        this.unresolvedTerminals.set(terminal, { openedAt: Date.now() });
+      }
+    }
+  }
+
+  /**
+   * Extract the 8-char session slug from a terminal name like "Claude Code (abc12345)".
+   * Returns null if no slug pattern found.
+   */
+  extractSlugFromName(name: string): string | null {
+    const match = name.match(/\(([0-9a-f]{8})\)/i);
+    return match ? match[1] : null;
+  }
+
+  /**
+   * Resolve an unresolved terminal by mapping it to a sessionId.
+   * Called when SessionWatcher discovers a JSONL matching an unresolved terminal.
+   */
+  resolveTerminal(sessionId: string, terminal: vscode.Terminal): void {
+    this.unresolvedTerminals.delete(terminal);
+    this.sessionTerminals.set(sessionId, terminal);
+    this.flushPendingInputs(sessionId, terminal);
+  }
+
+  /** Get unresolved Claude terminals for JSONL matching. */
+  getUnresolvedTerminals(): Array<{ terminal: vscode.Terminal; openedAt: number }> {
+    return [...this.unresolvedTerminals.entries()].map(([terminal, info]) => ({ terminal, ...info }));
   }
 
   /**

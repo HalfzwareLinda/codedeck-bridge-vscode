@@ -288,10 +288,9 @@ export class BridgeCore {
       onRefreshSessions: () => {
         this.log('[Codedeck] Refresh sessions request received');
         if (!this.sessionProvider) { return; }
-        // Re-scan files from disk first — picks up changes the watcher missed
-        this.sessionProvider.rescanSessions?.();
+        // Terminal-first: just re-emit the current active session list
         const sessions = this.sessionProvider.getSessions();
-        this.log(`[Codedeck] Re-publishing ${sessions.length} sessions (after rescan)`);
+        this.log(`[Codedeck] Re-publishing ${sessions.length} sessions`);
         this.onSessionListChanged(sessions);
       },
       onCloseSession: async (sessionId) => {

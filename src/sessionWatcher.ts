@@ -67,6 +67,12 @@ class AutoApproveQueue {
    * in-flight and the caller should fire the keypress now.
    */
   enqueue(sessionId: string, toolUseId: string, toolName: string): { immediate: boolean } {
+    // Dedup: skip if already inflight or queued for this session
+    const inf = this.inflight.get(sessionId);
+    if (inf && inf.toolUseId === toolUseId) { return { immediate: false }; }
+    const existing = this.queues.get(sessionId);
+    if (existing?.some(p => p.toolUseId === toolUseId)) { return { immediate: false }; }
+
     // When paused (plan/question showing), always queue — never fire immediately
     if (this.paused.has(sessionId)) {
       let q = this.queues.get(sessionId);
@@ -211,7 +217,6 @@ export interface SessionWatcherEvents {
   onOutput: (sessionId: string, entries: Array<{ seq: number; entry: OutputEntry }>) => void;
   onSessionListChanged: (sessions: RemoteSessionInfo[]) => void;
   onNewSession?: (sessionId: string, cwd: string) => void;
-  onExistingSession?: (sessionId: string, cwd: string) => void;
   /** Fired when a JSONL user entry reveals the session's actual permissionMode. */
   onPermissionModeChanged?: (sessionId: string, mode: string) => void;
   /** Fired when a tool permission should be auto-approved (e.g. read-only tools in plan mode, or default/YOLO mode). */
@@ -248,7 +253,15 @@ export class SessionWatcher implements vscode.Disposable {
   private pausingToolUseIds: Map<string, string> = new Map();
   private emitDebounceTimer: NodeJS.Timeout | null = null;
   private pollCount = 0;
-  private static readonly NEW_FILE_SCAN_EVERY_N_POLLS = 3; // scan for new files every 3rd poll (every 6s)
+  private static readonly PENDING_WATCH_POLL_EVERY_N = 3; // check pending watches every 3rd poll (every 6s)
+  /** Sessions where terminal exists but JSONL hasn't appeared yet. */
+  private pendingSessionWatches: Map<string, { cwd?: string; registeredAt: number }> = new Map();
+  private static readonly PENDING_WATCH_TIMEOUT_MS = 60_000;
+  /**
+   * Callback to check if a newly created JSONL should be accepted.
+   * Returns true if an unresolved terminal matches (temporal proximity + cwd).
+   */
+  shouldAcceptNewFile?: (sessionId: string, cwd: string) => boolean;
 
   constructor(events: SessionWatcherEvents, workspaceCwd?: string) {
     this.events = events;
@@ -262,8 +275,8 @@ export class SessionWatcher implements vscode.Disposable {
       return;
     }
 
-    // Initial scan of all existing sessions
-    this.scanAllSessions();
+    // Terminal-first: NO initial scan of all sessions.
+    // Sessions are added via watchSession() when TerminalRegistry discovers terminals.
 
     // Watch for JSONL file changes using vscode FileSystemWatcher
     const pattern = new vscode.RelativePattern(this.claudeDir, '**/*.jsonl');
@@ -350,7 +363,7 @@ export class SessionWatcher implements vscode.Disposable {
       const currentModeForHistory = this.events.getTrackedMode?.(sessionId)
         ?? this.permissionModes.get(sessionId)
         ?? 'default';
-      const withPermissions = this.injectPermissionRequests(allParsed, resolved, sessionId, currentModeForHistory);
+      const withPermissions = this.injectPermissionRequests(allParsed, resolved, sessionId, currentModeForHistory, true);
       for (const entry of withPermissions) {
         seq++;
         entries.push({ seq, entry });
@@ -371,6 +384,105 @@ export class SessionWatcher implements vscode.Disposable {
     }
   }
 
+  // --- Terminal-first session management ---
+
+  /**
+   * Start watching a specific session's JSONL file.
+   * Called when TerminalRegistry discovers a terminal for this session.
+   */
+  watchSession(sessionId: string, cwd?: string): void {
+    // Already watching?
+    for (const meta of this.sessionMeta.values()) {
+      if (meta.sessionId === sessionId) { return; }
+    }
+
+    const filePath = this.findJsonlForSession(sessionId);
+    if (!filePath) {
+      // JSONL doesn't exist yet — register pending watch (resolved by poll loop)
+      console.log(`[Codedeck] watchSession: JSONL not found for ${sessionId}, registering pending watch`);
+      this.pendingSessionWatches.set(sessionId, { cwd, registeredAt: Date.now() });
+      return;
+    }
+
+    console.log(`[Codedeck] watchSession: starting to watch ${sessionId}`);
+    this.fileOffsets.set(filePath, 0);
+    this.indexSession(filePath);
+    this.readNewLines(filePath);
+    this.emitSessionList();
+  }
+
+  /**
+   * Stop watching a session's JSONL file.
+   * Called when a terminal closes.
+   */
+  unwatchSession(sessionId: string): void {
+    this.pendingSessionWatches.delete(sessionId);
+
+    // Find the filePath for this session
+    let targetPath: string | null = null;
+    for (const [filePath, meta] of this.sessionMeta) {
+      if (meta.sessionId === sessionId) { targetPath = filePath; break; }
+    }
+
+    if (targetPath) {
+      this.fileOffsets.delete(targetPath);
+      this.sessionMeta.delete(targetPath);
+    }
+    this.sessionHistory.delete(sessionId);
+    this.seqCounters.delete(sessionId);
+    this.resolvedToolIds.delete(sessionId);
+    this.permissionModes.delete(sessionId);
+    this.lastOutputTime.delete(sessionId);
+    this.autoApproveQueue.clear(sessionId);
+    this.pausingToolUseIds.delete(sessionId);
+
+    console.log(`[Codedeck] unwatchSession: stopped watching ${sessionId}`);
+    this.emitSessionList();
+  }
+
+  /**
+   * Search for a JSONL file by sessionId across all project directories.
+   * JSONL files are named <sessionId>.jsonl under ~/.claude/projects/<encoded-cwd>/.
+   */
+  findJsonlForSession(sessionId: string): string | null {
+    try {
+      const projectDirs = fs.readdirSync(this.claudeDir);
+      for (const dir of projectDirs) {
+        const candidate = path.join(this.claudeDir, dir, `${sessionId}.jsonl`);
+        try {
+          fs.statSync(candidate);
+          return candidate;
+        } catch { /* not in this dir */ }
+      }
+    } catch { /* claudeDir doesn't exist */ }
+    return null;
+  }
+
+  /**
+   * Find a full sessionId by its 8-char slug prefix.
+   * Used for phone-spawned terminal recovery (terminal name has slug).
+   */
+  findSessionBySlug(slug: string): string | null {
+    try {
+      const projectDirs = fs.readdirSync(this.claudeDir);
+      for (const dir of projectDirs) {
+        const projectPath = path.join(this.claudeDir, dir);
+        try {
+          const stat = fs.statSync(projectPath);
+          if (!stat.isDirectory()) { continue; }
+        } catch { continue; }
+
+        const files = fs.readdirSync(projectPath).filter(f => f.endsWith('.jsonl'));
+        for (const file of files) {
+          if (file.startsWith(slug)) {
+            return file.replace('.jsonl', '');
+          }
+        }
+      }
+    } catch { /* claudeDir doesn't exist */ }
+    return null;
+  }
+
   /**
    * Get total history entry count for a session.
    */
@@ -378,38 +490,7 @@ export class SessionWatcher implements vscode.Disposable {
     return this.sessionHistory.get(sessionId)?.length ?? 0;
   }
 
-  private scanAllSessions(): void {
-    try {
-      const projectDirs = fs.readdirSync(this.claudeDir);
-      for (const dir of projectDirs) {
-        const projectPath = path.join(this.claudeDir, dir);
-        const stat = fs.statSync(projectPath);
-        if (!stat.isDirectory()) { continue; }
-
-        const files = fs.readdirSync(projectPath).filter(f => f.endsWith('.jsonl'));
-        for (const file of files) {
-          const filePath = path.join(projectPath, file);
-          this.indexSession(filePath);
-        }
-      }
-
-      // Derive seq counters from file content so seq continues across restarts
-      for (const [, meta] of this.sessionMeta) {
-        if (!this.seqCounters.has(meta.sessionId)) {
-          this.loadFullHistory(meta.sessionId);
-        }
-      }
-
-      // Notify about existing sessions so TerminalRegistry can map them
-      for (const [, meta] of this.sessionMeta) {
-        this.events.onExistingSession?.(meta.sessionId, meta.cwd);
-      }
-
-      this.emitSessionList();
-    } catch (err) {
-      console.error('[Codedeck] Error scanning sessions:', err);
-    }
-  }
+  // scanAllSessions removed — terminal-first architecture uses watchSession() instead.
 
   /**
    * Read complete JSONL lines from a file, skipping over huge lines
@@ -497,13 +578,28 @@ export class SessionWatcher implements vscode.Disposable {
   private onFileCreated(filePath: string): void {
     if (!filePath.endsWith('.jsonl')) { return; }
     if (filePath.includes('/subagents/')) { return; }
+    // Already watching this file
+    if (this.fileOffsets.has(filePath)) { return; }
 
-    console.log(`[Codedeck] FileSystemWatcher onFileCreated: ${path.basename(filePath)}`);
+    // Extract sessionId from filename (e.g. "<uuid>.jsonl")
+    const sessionId = path.basename(filePath, '.jsonl');
 
-    // New session file — index it and start from beginning.
-    // With fallbackCwd, indexSession succeeds even if only queue-operation
-    // lines exist (no cwd yet). If file is truly empty, the 2s poll loop
-    // in pollActiveFiles will pick it up via readNewLines's retry path.
+    // Terminal-first gate: only accept if there's a pending watch or an unresolved terminal match
+    const hasPendingWatch = this.pendingSessionWatches.has(sessionId);
+    if (!hasPendingWatch) {
+      // Try to index temporarily to get cwd for the shouldAcceptNewFile callback
+      const lines = this.readFirstLines(filePath, 20);
+      const meta = extractSessionMeta(lines, this.workspaceCwd, filePath);
+      const accepted = meta && this.shouldAcceptNewFile?.(sessionId, meta.cwd);
+      if (!accepted) {
+        // No terminal waiting for this file — ignore it
+        return;
+      }
+    }
+
+    console.log(`[Codedeck] onFileCreated: accepted ${sessionId} (pending=${hasPendingWatch})`);
+    this.pendingSessionWatches.delete(sessionId);
+
     this.fileOffsets.set(filePath, 0);
     this.indexSession(filePath);
     this.emitSessionList();
@@ -512,8 +608,6 @@ export class SessionWatcher implements vscode.Disposable {
     if (meta) {
       console.log(`[Codedeck] onFileCreated: indexed ${meta.sessionId}, firing onNewSession`);
       this.events.onNewSession?.(meta.sessionId, meta.cwd);
-    } else {
-      console.log(`[Codedeck] onFileCreated: indexing failed for ${path.basename(filePath)} — will retry via poll`);
     }
 
     this.readNewLines(filePath);
@@ -522,8 +616,9 @@ export class SessionWatcher implements vscode.Disposable {
   private onFileChanged(filePath: string): void {
     if (!filePath.endsWith('.jsonl')) { return; }
     if (filePath.includes('/subagents/')) { return; }
+    // Only process files we're actively watching
+    if (!this.fileOffsets.has(filePath)) { return; }
 
-    console.log(`[Codedeck] FileSystemWatcher onFileChanged: ${path.basename(filePath)}`);
     this.readNewLines(filePath);
   }
 
@@ -798,6 +893,7 @@ export class SessionWatcher implements vscode.Disposable {
     resolvedIds: Set<string> = new Set(),
     sessionId?: string,
     permissionMode?: string,
+    suppressAutoApprove?: boolean,
   ): OutputEntry[] {
     // Pre-scan: collect tool_use_ids that have a tool_result in THIS batch.
     // If both arrive in the same 2s poll window, the tool was auto-approved.
@@ -820,23 +916,27 @@ export class SessionWatcher implements vscode.Disposable {
             && !batchResolvedIds.has(toolUseId)) {
           // In default (YOLO) mode, auto-approve ALL tools
           if (sessionId && permissionMode === 'default') {
-            const { immediate } = this.autoApproveQueue.enqueue(sessionId, toolUseId, toolName);
-            if (immediate) {
-              console.log(`[Codedeck] Auto-approving ${toolName} in default mode (id=${toolUseId})`);
-              this.events.onAutoApprovePermission?.(sessionId, toolUseId, toolName);
-            } else {
-              console.log(`[Codedeck] Auto-approve queued: ${toolName} in default mode (id=${toolUseId})`);
+            if (!suppressAutoApprove) {
+              const { immediate } = this.autoApproveQueue.enqueue(sessionId, toolUseId, toolName);
+              if (immediate) {
+                console.log(`[Codedeck] Auto-approving ${toolName} in default mode (id=${toolUseId})`);
+                this.events.onAutoApprovePermission?.(sessionId, toolUseId, toolName);
+              } else {
+                console.log(`[Codedeck] Auto-approve queued: ${toolName} in default mode (id=${toolUseId})`);
+              }
             }
             continue;
           }
           // In plan mode, auto-approve read-only tools instead of prompting
           if (permissionMode === 'plan' && shouldAutoApproveInPlanMode(toolName) && sessionId) {
-            const { immediate } = this.autoApproveQueue.enqueue(sessionId, toolUseId, toolName);
-            if (immediate) {
-              console.log(`[Codedeck] Auto-approving ${toolName} in plan mode (id=${toolUseId})`);
-              this.events.onAutoApprovePermission?.(sessionId, toolUseId, toolName);
-            } else {
-              console.log(`[Codedeck] Auto-approve queued: ${toolName} in plan mode (id=${toolUseId})`);
+            if (!suppressAutoApprove) {
+              const { immediate } = this.autoApproveQueue.enqueue(sessionId, toolUseId, toolName);
+              if (immediate) {
+                console.log(`[Codedeck] Auto-approving ${toolName} in plan mode (id=${toolUseId})`);
+                this.events.onAutoApprovePermission?.(sessionId, toolUseId, toolName);
+              } else {
+                console.log(`[Codedeck] Auto-approve queued: ${toolName} in plan mode (id=${toolUseId})`);
+              }
             }
             // Don't inject permission_request — phone won't see the prompt
             continue;
@@ -944,10 +1044,10 @@ export class SessionWatcher implements vscode.Disposable {
 
   private pollActiveFiles(): void {
     this.pollCount++;
-    if (this.pollCount % SessionWatcher.NEW_FILE_SCAN_EVERY_N_POLLS === 0) {
-      this.scanForNewFiles();
-      // Prune deleted sessions every 6th scan (~36s)
-      if (this.pollCount % (SessionWatcher.NEW_FILE_SCAN_EVERY_N_POLLS * 6) === 0) {
+    if (this.pollCount % SessionWatcher.PENDING_WATCH_POLL_EVERY_N === 0) {
+      this.resolvePendingWatches();
+      // Prune deleted sessions every 6th cycle (~36s)
+      if (this.pollCount % (SessionWatcher.PENDING_WATCH_POLL_EVERY_N * 6) === 0) {
         this.pruneDeletedSessions();
       }
     }
@@ -1082,82 +1182,69 @@ export class SessionWatcher implements vscode.Disposable {
   }
 
   /**
-   * Force a full re-scan of session files from disk.
-   * Called on refresh-sessions requests to pick up changes that
-   * the FileSystemWatcher or poll loop may have missed.
+   * Re-emit the current session list from actively watched sessions.
+   * Called on refresh-sessions requests.
    */
   rescanSessions(): void {
-    this.scanAllSessions();
+    this.emitSessionList();
   }
 
   /**
-   * Lightweight scan for NEW .jsonl files not yet in fileOffsets.
-   * Unlike scanAllSessions(), this only indexes previously-unknown files
-   * and fires onNewSession for each one. Fast enough to call every few
-   * seconds as a backup when FileSystemWatcher doesn't fire.
+   * Resolve pending session watches — check if JSONL files have appeared
+   * for sessions that have a terminal but no JSONL yet.
+   * Also prunes expired pending watches.
    */
-  scanForNewFiles(): void {
-    try {
-      const projectDirs = fs.readdirSync(this.claudeDir);
-      for (const dir of projectDirs) {
-        const projectPath = path.join(this.claudeDir, dir);
-        try {
-          const stat = fs.statSync(projectPath);
-          if (!stat.isDirectory()) { continue; }
-        } catch { continue; }
+  private resolvePendingWatches(): void {
+    const now = Date.now();
+    for (const [sessionId, watch] of [...this.pendingSessionWatches]) {
+      // Prune expired
+      if (now - watch.registeredAt > SessionWatcher.PENDING_WATCH_TIMEOUT_MS) {
+        console.log(`[Codedeck] Pending watch expired for ${sessionId}`);
+        this.pendingSessionWatches.delete(sessionId);
+        continue;
+      }
 
-        const files = fs.readdirSync(projectPath).filter(f => f.endsWith('.jsonl'));
-        for (const file of files) {
-          const filePath = path.join(projectPath, file);
-          if (filePath.includes('/subagents/')) { continue; }
-          if (this.fileOffsets.has(filePath)) { continue; }
+      const filePath = this.findJsonlForSession(sessionId);
+      if (filePath) {
+        console.log(`[Codedeck] Pending watch resolved: ${sessionId}`);
+        this.pendingSessionWatches.delete(sessionId);
+        this.fileOffsets.set(filePath, 0);
+        this.indexSession(filePath);
+        this.readNewLines(filePath);
+        this.emitSessionList();
 
-          // New file — index from the beginning
-          console.log(`[Codedeck] scanForNewFiles discovered: ${file}`);
-          this.fileOffsets.set(filePath, 0);
-          this.indexSession(filePath);
-
-          const meta = this.sessionMeta.get(filePath);
-          if (meta) {
-            console.log(`[Codedeck] scanForNewFiles: new session ${meta.sessionId}`);
-            this.emitSessionList();
-            this.events.onNewSession?.(meta.sessionId, meta.cwd);
-            this.readNewLines(filePath);
-          }
+        const meta = this.sessionMeta.get(filePath);
+        if (meta) {
+          this.events.onNewSession?.(meta.sessionId, meta.cwd);
         }
       }
-      // Recovery pass: retry files we track but failed to index (e.g. file was empty on creation)
-      for (const filePath of this.fileOffsets.keys()) {
-        if (this.sessionMeta.has(filePath)) { continue; }
-        try {
-          const stat = fs.statSync(filePath);
-          if (stat.size > 0) {
-            this.indexSession(filePath);
-            if (this.sessionMeta.has(filePath)) {
-              const meta = this.sessionMeta.get(filePath)!;
-              console.log(`[Codedeck] scanForNewFiles: recovered half-indexed ${meta.sessionId}`);
-              this.emitSessionList();
-              this.events.onNewSession?.(meta.sessionId, meta.cwd);
-            }
+    }
+
+    // Recovery pass: retry files we track but failed to index (e.g. file was empty on creation)
+    for (const filePath of this.fileOffsets.keys()) {
+      if (this.sessionMeta.has(filePath)) { continue; }
+      try {
+        const stat = fs.statSync(filePath);
+        if (stat.size > 0) {
+          this.indexSession(filePath);
+          if (this.sessionMeta.has(filePath)) {
+            const meta = this.sessionMeta.get(filePath)!;
+            console.log(`[Codedeck] resolvePendingWatches: recovered half-indexed ${meta.sessionId}`);
+            this.emitSessionList();
+            this.events.onNewSession?.(meta.sessionId, meta.cwd);
           }
-        } catch { /* file may have been deleted */ }
-      }
-    } catch (err) {
-      console.error('[Codedeck] Error scanning for new files:', err);
+        }
+      } catch { /* file may have been deleted */ }
     }
   }
 
   getSessions(): RemoteSessionInfo[] {
+    // Terminal-first: only watched sessions are in sessionMeta, so all are valid.
     const sessions: RemoteSessionInfo[] = [];
-    const now = Date.now();
-    const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
-    const MAX_SESSIONS = 15;
 
     for (const [filePath, meta] of this.sessionMeta) {
       try {
         const stat = fs.statSync(filePath);
-        // Skip sessions not modified in the last 7 days
-        if (now - stat.mtimeMs > MAX_AGE_MS) { continue; }
         sessions.push({
           id: meta.sessionId,
           slug: meta.slug,
@@ -1185,9 +1272,9 @@ export class SessionWatcher implements vscode.Disposable {
     }
     const unique = [...deduped.values()];
 
-    // Sort by last activity, most recent first — cap to avoid oversized Nostr events
+    // Sort by last activity, most recent first
     unique.sort((a, b) => b.lastActivity.localeCompare(a.lastActivity));
-    return unique.slice(0, MAX_SESSIONS);
+    return unique;
   }
 
   /** Get the current permission mode for a session (from JSONL parsing). */

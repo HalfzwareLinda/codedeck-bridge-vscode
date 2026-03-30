@@ -824,6 +824,9 @@ export class NostrRelay {
         case 'upload-image':
           this.events.onUploadImage(msg, event.pubkey);
           break;
+        default:
+          this.log(`[Codedeck] Ignoring unhandled message type: ${(msg as any).type}`);
+          break;
       }
     } catch (err) {
       console.error('[Codedeck] Failed to decrypt/parse incoming event:', err);
