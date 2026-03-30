@@ -51,6 +51,8 @@ export interface SessionProvider {
   rescanSessions?: () => void;
   /** Get the current permission mode for a session (from JSONL parsing). */
   getPermissionMode?: (sessionId: string) => string | undefined;
+  /** Check if a tool_use_id already has a matching tool_result. */
+  isToolResolved?: (sessionId: string, toolUseId: string) => boolean;
 }
 
 /**
@@ -156,7 +158,13 @@ export class BridgeCore {
           await this.relay.publishSessionFailed(sessionId, 'terminal-failed');
         }
       },
-      onPermissionResponse: async (sessionId, _requestId, allow, modifier) => {
+      onPermissionResponse: async (sessionId, requestId, allow, modifier) => {
+        // Guard: if the tool already resolved (e.g. terminal advanced past the prompt
+        // before the phone user tapped Allow), skip the keypress to avoid phantom input.
+        if (requestId && this.sessionProvider?.isToolResolved?.(sessionId, requestId)) {
+          this.log(`[Codedeck] Permission response for ${sessionId} skipped — tool ${requestId} already resolved`);
+          return;
+        }
         // Claude Code's permission prompt is an Ink SelectInput with numbered options:
         //   1. Yes
         //   2. Yes, allow all edits during this session (shift+tab)
