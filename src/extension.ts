@@ -51,7 +51,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // --- Read configuration ---
   const config = vscode.workspace.getConfiguration('codedeck');
-  const relays = config.get<string[]>('relays', ['wss://relay.primal.net', 'wss://relay.nostr.band', 'wss://nos.lol']);
+  const relays = config.get<string[]>('relays', ['wss://relay2.descendant.io', 'wss://relay.primal.net', 'wss://relay.nostr.band', 'wss://nos.lol']);
   const machineName = config.get<string>('machineName', '') || os.hostname();
 
   // --- Load paired phones ---
