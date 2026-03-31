@@ -2,7 +2,7 @@
   "name": "codedeck-bridge",
   "displayName": "Codedeck Bridge",
   "description": "Bridge Claude Code sessions to Codedeck mobile app over Nostr relays",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "publisher": "halfzwarelinda",
   "repository": {
     "type": "git",
