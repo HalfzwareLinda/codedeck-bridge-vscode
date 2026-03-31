@@ -107,14 +107,24 @@ export const NEVER_NEEDS_PERMISSION = new Set([
 ]);
 
 /** Tools that are safe to auto-approve when in plan mode.
- *  Plan mode restricts Claude to read-only tools at the model level,
- *  so any tool it invokes during planning is safe to approve automatically.
- *  This lets the planning phase run uninterrupted without prompting the user. */
+ *  Plan mode restricts Claude to read-only exploration at the model level.
+ *  Write and Edit are excluded — if the model tries to modify files during
+ *  planning, the user should see a permission card on the phone. */
 export const PLAN_MODE_AUTO_APPROVE = new Set([
   'Read', 'Glob', 'Grep', 'Agent', 'WebSearch', 'WebFetch',
   'AskUserQuestion', 'EnterPlanMode', 'Skill',
   'TaskCreate', 'TaskUpdate', 'TaskList', 'TaskGet', 'TaskOutput',
-  'Bash', 'Write', 'Edit', 'ToolSearch',
+  'Bash', 'ToolSearch',
+]);
+
+/** Tools safe to auto-approve in acceptEdits mode.
+ *  Reads and file edits are auto-approved — Bash commands, network
+ *  requests, and sub-agents still prompt. */
+export const ACCEPT_EDITS_AUTO_APPROVE = new Set([
+  'Read', 'Glob', 'Grep', 'Write', 'Edit',
+  'AskUserQuestion', 'Skill',
+  'TaskCreate', 'TaskUpdate', 'TaskList', 'TaskGet', 'TaskOutput',
+  'ToolSearch',
 ]);
 
 // --- File paths ---

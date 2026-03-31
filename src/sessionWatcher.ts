@@ -12,7 +12,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { parseJsonlLine, extractSessionMeta, extractFirstUserMessage, resolveProjectFromCwd, extractPermissionMode, extractModeFromToolUse, extractClaudeCodeVersion, toolNeedsPermission, shouldAutoApproveInPlanMode } from './jsonlParser';
+import { parseJsonlLine, extractSessionMeta, extractFirstUserMessage, resolveProjectFromCwd, extractPermissionMode, extractClaudeCodeVersion, toolNeedsPermission, shouldAutoApproveInPlanMode, shouldAutoApproveInAcceptEdits } from './jsonlParser';
 import type { OutputEntry, RemoteSessionInfo } from './types';
 
 const MAX_HISTORY_PER_SESSION = 500;
@@ -772,18 +772,11 @@ export class SessionWatcher implements vscode.Disposable {
         if (mode) {
           this.permissionModes.set(meta.sessionId, mode);
           this.events.onPermissionModeChanged?.(meta.sessionId, mode);
-          // If mode changed away from plan or default (YOLO), flush the auto-approve
-          // queue so remaining tools become normal permission cards on the next cycle.
-          if (mode !== 'plan' && mode !== 'default') {
+          // If mode changed away from plan, default (YOLO), or acceptEdits, flush
+          // the auto-approve queue so remaining tools become normal permission cards.
+          if (mode !== 'plan' && mode !== 'default' && mode !== 'acceptEdits') {
             this.autoApproveQueue.clear(meta.sessionId);
           }
-        }
-
-        // Detect mode changes from tool_use (e.g., EnterPlanMode)
-        const toolMode = extractModeFromToolUse(line);
-        if (toolMode) {
-          this.permissionModes.set(meta.sessionId, toolMode);
-          this.events.onPermissionModeChanged?.(meta.sessionId, toolMode);
         }
 
         // Detect Claude Code version (only fires once per session)
@@ -1034,6 +1027,19 @@ export class SessionWatcher implements vscode.Disposable {
             // Don't inject permission_request — phone won't see the prompt
             continue;
           }
+          // In acceptEdits mode, auto-approve file reads + edits
+          if (permissionMode === 'acceptEdits' && shouldAutoApproveInAcceptEdits(toolName) && sessionId) {
+            if (!suppressAutoApprove) {
+              const { immediate } = this.autoApproveQueue.enqueue(sessionId, toolUseId, toolName);
+              if (immediate) {
+                console.log(`[Codedeck] Auto-approving ${toolName} in acceptEdits mode (id=${toolUseId})`);
+                this.events.onAutoApprovePermission?.(sessionId, toolUseId, toolName);
+              } else {
+                console.log(`[Codedeck] Auto-approve queued: ${toolName} in acceptEdits mode (id=${toolUseId})`);
+              }
+            }
+            continue;
+          }
           console.log(`[Codedeck] Injected permission_request for ${toolName} (id=${toolUseId})`);
           result.push({
             entryType: 'system',
@@ -1238,10 +1244,11 @@ export class SessionWatcher implements vscode.Disposable {
       if (!toolNeedsPermission(toolName)) { continue; }
       if (batchResolvedIds.has(toolUseId)) { continue; }
 
-      // Auto-approve in default mode or plan mode with whitelisted tool
+      // Auto-approve in default mode, plan mode, or acceptEdits mode with whitelisted tool
       const shouldAutoApprove =
         currentMode === 'default' ||
-        (currentMode === 'plan' && shouldAutoApproveInPlanMode(toolName));
+        (currentMode === 'plan' && shouldAutoApproveInPlanMode(toolName)) ||
+        (currentMode === 'acceptEdits' && shouldAutoApproveInAcceptEdits(toolName));
 
       if (shouldAutoApprove) {
         const { immediate } = this.autoApproveQueue.enqueue(parentSessionId, toolUseId, toolName);

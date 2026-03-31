@@ -12,7 +12,7 @@
 
 import * as path from 'path';
 import type { ClaudeJsonlLine, ClaudeContentBlock, OutputEntry } from './types';
-import { NEVER_NEEDS_PERMISSION, PLAN_MODE_AUTO_APPROVE } from './compat';
+import { NEVER_NEEDS_PERMISSION, PLAN_MODE_AUTO_APPROVE, ACCEPT_EDITS_AUTO_APPROVE } from './compat';
 
 // --- Permission detection ---
 
@@ -38,23 +38,6 @@ export function extractPermissionMode(line: string): string | undefined {
   return undefined;
 }
 
-/** Detect mode-changing tool_use calls from assistant entries.
- *  Returns 'plan' when EnterPlanMode is found.
- *  Does NOT detect ExitPlanMode — that is handled via plan_approval flow. */
-export function extractModeFromToolUse(line: string): string | undefined {
-  try {
-    const parsed = JSON.parse(line.trim());
-    if (parsed.type === 'assistant' && Array.isArray(parsed.message?.content)) {
-      for (const block of parsed.message.content) {
-        if (block.type === 'tool_use' && block.name === 'EnterPlanMode') {
-          return 'plan';
-        }
-      }
-    }
-  } catch { /* ignore parse errors */ }
-  return undefined;
-}
-
 /** Check whether a tool might show a permission prompt.
  *  Uses a small denylist of truly internal tools. Everything else (including
  *  Read/Glob/Grep) is assumed to potentially prompt — the bridge's same-batch
@@ -67,6 +50,11 @@ export function toolNeedsPermission(toolName: string, _permissionMode?: string):
 /** Check whether a tool should be auto-approved when the session is in plan mode. */
 export function shouldAutoApproveInPlanMode(toolName: string): boolean {
   return PLAN_MODE_AUTO_APPROVE.has(toolName);
+}
+
+/** Check whether a tool should be auto-approved when the session is in acceptEdits mode. */
+export function shouldAutoApproveInAcceptEdits(toolName: string): boolean {
+  return ACCEPT_EDITS_AUTO_APPROVE.has(toolName);
 }
 
 /**

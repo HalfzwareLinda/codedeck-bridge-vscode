@@ -17,6 +17,7 @@ import {
   checkVersionCompat,
   NEVER_NEEDS_PERMISSION,
   PLAN_MODE_AUTO_APPROVE,
+  ACCEPT_EDITS_AUTO_APPROVE,
   KNOWN_LINE_TYPES,
   PERMISSION_KEYS,
   PLAN_APPROVAL_KEYS,
@@ -268,9 +269,23 @@ describe('tool name sets', () => {
 
   it('PLAN_MODE_AUTO_APPROVE contains expected tools', () => {
     const expected = ['Read', 'Glob', 'Grep', 'Agent', 'WebSearch', 'WebFetch',
-      'AskUserQuestion', 'EnterPlanMode', 'Skill', 'Bash', 'Write', 'Edit', 'ToolSearch'];
+      'AskUserQuestion', 'EnterPlanMode', 'Skill', 'Bash', 'ToolSearch'];
     for (const tool of expected) {
       expect(PLAN_MODE_AUTO_APPROVE.has(tool)).toBe(true);
+    }
+    // Write and Edit should NOT be in plan mode (plan = read-only)
+    expect(PLAN_MODE_AUTO_APPROVE.has('Write')).toBe(false);
+    expect(PLAN_MODE_AUTO_APPROVE.has('Edit')).toBe(false);
+  });
+
+  it('ACCEPT_EDITS_AUTO_APPROVE contains reads and edits but not Bash/network/agents', () => {
+    // File reads and edits should be auto-approved
+    for (const tool of ['Read', 'Glob', 'Grep', 'Write', 'Edit', 'ToolSearch']) {
+      expect(ACCEPT_EDITS_AUTO_APPROVE.has(tool)).toBe(true);
+    }
+    // Bash, network, and agents should NOT be auto-approved
+    for (const tool of ['Bash', 'WebSearch', 'WebFetch', 'Agent']) {
+      expect(ACCEPT_EDITS_AUTO_APPROVE.has(tool)).toBe(false);
     }
   });
 
