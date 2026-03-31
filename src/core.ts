@@ -208,33 +208,22 @@ export class BridgeCore {
 
         if (this.trackedModes.get(sessionId) === 'plan' && context !== 'question') {
           switch (key) {
-            case '1': {
-              // Clear context & auto-accept → new session spawns with acceptEdits
-              this.trackedModes.set(sessionId, 'acceptEdits');
-              planApprovalMode = 'acceptEdits';
-              const sessions = this.sessionProvider?.getSessions() ?? [];
-              const session = sessions.find(s => s.id === sessionId);
-              const cwd = session?.cwd || this.workspaceCwd;
-              this.pendingReplacements.set(sessionId, { cwd, timestamp: Date.now() });
-              this.log(`[Codedeck] Plan option 1 detected — tracking ${sessionId} for replacement`);
-              break;
-            }
-            case '2':
+            case '1':
               // Approve (auto-accept edits)
               this.trackedModes.set(sessionId, 'acceptEdits');
               planApprovalMode = 'acceptEdits';
-              this.log(`[Codedeck] Plan option 2 — tracked mode → acceptEdits for ${sessionId}`);
+              this.log(`[Codedeck] Plan option 1 — tracked mode → acceptEdits for ${sessionId}`);
               break;
-            case '3':
+            case '2':
               // Approve (manual edits)
               this.trackedModes.set(sessionId, 'default');
               planApprovalMode = 'default';
-              this.log(`[Codedeck] Plan option 3 — tracked mode → default for ${sessionId}`);
+              this.log(`[Codedeck] Plan option 2 — tracked mode → default for ${sessionId}`);
               break;
-            case '4':
+            case '3':
               // Revise plan — stays in plan mode, next input is a revision (skip Escape)
               this.pendingRevisionSessions.add(sessionId);
-              this.log(`[Codedeck] Plan option 4 — next input for ${sessionId} is a revision`);
+              this.log(`[Codedeck] Plan option 3 — next input for ${sessionId} is a revision`);
               break;
           }
         }
