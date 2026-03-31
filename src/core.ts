@@ -298,6 +298,7 @@ export class BridgeCore {
         this.modeQueue.delete(sessionId);
         this.pendingModeVerification.delete(sessionId);
         this.pendingRetryCount.delete(sessionId);
+        this.lastDriftCorrectionPublish.delete(sessionId);
         const found = this.terminal.closeSession(sessionId);
         // Re-publish session list excluding the closed session
         const sessions = (this.sessionProvider?.getSessions() ?? [])
@@ -371,6 +372,9 @@ export class BridgeCore {
   private pendingRetryCount: Map<string, number> = new Map();
   private static readonly MODE_VERIFY_WINDOW_MS = 10_000;
   private static readonly MODE_VERIFY_MAX_RETRIES = 2;
+  /** Timestamp of last drift-correction mode-confirmed publish per session. */
+  private lastDriftCorrectionPublish: Map<string, number> = new Map();
+  private static readonly DRIFT_CORRECTION_COOLDOWN_MS = 2_000;
 
   /** Get the bridge's authoritative tracked mode for a session. */
   getTrackedMode(sessionId: string): string | undefined {
@@ -379,7 +383,9 @@ export class BridgeCore {
 
   /**
    * Called when a JSONL user entry reveals the actual permissionMode.
-   * If it contradicts trackedModes, update to the observed value (passive drift correction).
+   * If it contradicts trackedModes, update to the observed value (drift correction).
+   * For "organic" drift (not part of a pending phone-initiated verification),
+   * immediately publishes mode-confirmed to the phone for prompt UI sync.
    * Also performs event-driven verification of pending mode switches.
    */
   onPermissionModeObserved(sessionId: string, observedMode: string): void {
@@ -387,9 +393,20 @@ export class BridgeCore {
     if (tracked !== undefined && tracked !== observedMode) {
       this.log(`[Codedeck] Mode drift detected for ${sessionId}: tracked=${tracked}, observed=${observedMode} — syncing`);
       this.trackedModes.set(sessionId, observedMode);
-      // Passive correction only — the next natural session list publish will
-      // include the corrected mode. Eagerly re-publishing here caused a
-      // feedback loop with phone-side mode reconciliation (issue: session duplication).
+
+      // For "organic" drift (not part of a phone-initiated pending verification),
+      // immediately notify the phone. We publish mode-confirmed (not session list)
+      // which is safe — the phone handler only sets state, sends nothing back.
+      if (!this.pendingModeVerification.has(sessionId)) {
+        const now = Date.now();
+        const lastPublish = this.lastDriftCorrectionPublish.get(sessionId) ?? 0;
+        if (now - lastPublish >= BridgeCore.DRIFT_CORRECTION_COOLDOWN_MS) {
+          this.lastDriftCorrectionPublish.set(sessionId, now);
+          this.relay.publishModeConfirmed(sessionId, observedMode).catch(err => {
+            this.log(`[Codedeck] Failed to publish drift-correction mode-confirmed: ${err}`);
+          });
+        }
+      }
     } else if (tracked === undefined) {
       // First observation — seed the tracked state
       this.trackedModes.set(sessionId, observedMode);
