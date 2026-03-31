@@ -25,6 +25,7 @@ import {
   saveSecretKey,
 } from './pairing';
 import type { PairedPhone, RemoteSessionInfo } from './types';
+import { CLAUDE_CODE_EXTENSION_ID, checkVersionCompat, MAX_TESTED_VERSION } from './compat';
 
 let bridgeCore: BridgeCore | undefined;
 let sessionWatcher: SessionWatcher | undefined;
@@ -176,6 +177,9 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     },
     getTrackedMode: (sessionId) => bridgeCore?.getTrackedMode(sessionId),
+    onClaudeCodeVersionDetected: (sessionId, version) => {
+      bridgeCore?.onClaudeCodeVersionDetected(sessionId, version);
+    },
   }, workspaceCwd);
   context.subscriptions.push(sessionWatcher);
 
@@ -244,6 +248,23 @@ export function activate(context: vscode.ExtensionContext): void {
     bridgeCore.connect();
   } else {
     statusBar.setReady(0);
+  }
+
+  // --- Check installed Claude Code version at startup ---
+  const claudeCodeExt = vscode.extensions.getExtension(CLAUDE_CODE_EXTENSION_ID);
+  if (claudeCodeExt) {
+    const installedVersion = claudeCodeExt.packageJSON?.version as string | undefined;
+    if (installedVersion) {
+      const compat = checkVersionCompat(installedVersion);
+      log(`[Codedeck] Claude Code extension v${installedVersion} installed (${compat})`);
+      if (compat === 'untested') {
+        vscode.window.showInformationMessage(
+          `Codedeck Bridge: Claude Code v${installedVersion} detected. Bridge tested up to v${MAX_TESTED_VERSION}. Some features may not work correctly.`,
+        );
+      }
+    }
+  } else {
+    log('[Codedeck] Claude Code extension not found — session watching will still work if JSONL files exist');
   }
 
   // --- Helper: open pairing panel ---

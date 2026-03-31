@@ -15,6 +15,7 @@
  */
 
 import * as vscode from 'vscode';
+import { TERMINAL_SLUG_PATTERN, AUTOCOMPLETE_DELAY_MS, POST_ESCAPE_DELAY_MS, SHIFT_TAB_SEQUENCE } from './compat';
 
 /**
  * Find VSCode terminals that are running Claude Code.
@@ -143,7 +144,7 @@ export class TerminalRegistry implements vscode.Disposable {
    * Returns null if no slug pattern found.
    */
   extractSlugFromName(name: string): string | null {
-    const match = name.match(/\(([0-9a-f]{8})\)/i);
+    const match = name.match(TERMINAL_SLUG_PATTERN);
     return match ? match[1] : null;
   }
 
@@ -280,7 +281,7 @@ export class TerminalRegistry implements vscode.Disposable {
     if (known && known.exitStatus === undefined) {
       // Ensure terminal is visible (activates PTY) without stealing keyboard focus
       known.show(false);
-      known.sendText('\x1b[Z', false);
+      known.sendText(SHIFT_TAB_SEQUENCE, false);
       return true;
     }
     // Recover by slug match
@@ -290,7 +291,7 @@ export class TerminalRegistry implements vscode.Disposable {
     if (matched) {
       this.sessionTerminals.set(sessionId, matched);
       matched.show(false);
-      matched.sendText('\x1b[Z', false);
+      matched.sendText(SHIFT_TAB_SEQUENCE, false);
       return true;
     }
     return false;
@@ -517,19 +518,19 @@ export class TerminalRegistry implements vscode.Disposable {
 
     if (skipEscape) {
       // Direct submit — used for plan revision prompts where Escape cancels the prompt
-      await new Promise(r => setTimeout(r, 100));
+      await new Promise(r => setTimeout(r, POST_ESCAPE_DELAY_MS));
       if (terminal.exitStatus !== undefined) { return; }
       terminal.sendText('\r', false);
     } else {
       // Wait for autocomplete to engage
-      await new Promise(r => setTimeout(r, 300));
+      await new Promise(r => setTimeout(r, AUTOCOMPLETE_DELAY_MS));
 
       // Escape to dismiss autocomplete
       if (terminal.exitStatus !== undefined) { return; }
       terminal.sendText('\x1b', false);
 
       // Small delay before Enter
-      await new Promise(r => setTimeout(r, 100));
+      await new Promise(r => setTimeout(r, POST_ESCAPE_DELAY_MS));
 
       // Enter to submit
       if (terminal.exitStatus !== undefined) { return; }

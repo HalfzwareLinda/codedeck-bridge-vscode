@@ -12,7 +12,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { parseJsonlLine, extractSessionMeta, extractFirstUserMessage, resolveProjectFromCwd, extractPermissionMode, toolNeedsPermission, shouldAutoApproveInPlanMode } from './jsonlParser';
+import { parseJsonlLine, extractSessionMeta, extractFirstUserMessage, resolveProjectFromCwd, extractPermissionMode, extractClaudeCodeVersion, toolNeedsPermission, shouldAutoApproveInPlanMode } from './jsonlParser';
 import type { OutputEntry, RemoteSessionInfo } from './types';
 
 const MAX_HISTORY_PER_SESSION = 500;
@@ -243,6 +243,8 @@ export interface SessionWatcherEvents {
   onCancelAutoApprove?: (toolUseId: string) => void;
   /** Get the bridge's authoritative tracked mode (set optimistically on mode change). */
   getTrackedMode?: (sessionId: string) => string | undefined;
+  /** Fired when a JSONL user entry reveals the Claude Code version for a session. */
+  onClaudeCodeVersionDetected?: (sessionId: string, version: string) => void;
 }
 
 export class SessionWatcher implements vscode.Disposable {
@@ -252,6 +254,8 @@ export class SessionWatcher implements vscode.Disposable {
   private sessionHistory: Map<string, Array<{ seq: number; entry: OutputEntry }>> = new Map();
   private seqCounters: Map<string, number> = new Map();
   private permissionModes: Map<string, string> = new Map();
+  /** Claude Code version detected per session (from JSONL user entries). */
+  private claudeCodeVersions: Map<string, string> = new Map();
   /** Incrementally maintained set of tool_use_ids that have a tool_result per session. */
   private resolvedToolIds: Map<string, Set<string>> = new Map();
   /** Last time output was emitted per session — for LRU history eviction. */
@@ -462,6 +466,7 @@ export class SessionWatcher implements vscode.Disposable {
     this.seqCounters.delete(sessionId);
     this.resolvedToolIds.delete(sessionId);
     this.permissionModes.delete(sessionId);
+    this.claudeCodeVersions.delete(sessionId);
     this.lastOutputTime.delete(sessionId);
     this.autoApproveQueue.clear(sessionId);
     this.pausingToolUseIds.delete(sessionId);
@@ -485,7 +490,9 @@ export class SessionWatcher implements vscode.Disposable {
           return candidate;
         } catch { /* not in this dir */ }
       }
-    } catch { /* claudeDir doesn't exist */ }
+    } catch (err) {
+      console.error(`[Codedeck] findJsonlForSession failed to scan ${this.claudeDir}: ${err}`);
+    }
     return null;
   }
 
@@ -769,6 +776,15 @@ export class SessionWatcher implements vscode.Disposable {
           // queue so remaining tools become normal permission cards on the next cycle.
           if (mode !== 'plan' && mode !== 'default') {
             this.autoApproveQueue.clear(meta.sessionId);
+          }
+        }
+
+        // Detect Claude Code version (only fires once per session)
+        if (!this.claudeCodeVersions.has(meta.sessionId)) {
+          const ccVersion = extractClaudeCodeVersion(line);
+          if (ccVersion) {
+            this.claudeCodeVersions.set(meta.sessionId, ccVersion);
+            this.events.onClaudeCodeVersionDetected?.(meta.sessionId, ccVersion);
           }
         }
 
@@ -1523,18 +1539,21 @@ export class SessionWatcher implements vscode.Disposable {
    * Also prunes expired pending watches.
    */
   private resolvePendingWatches(): void {
+    if (this.pendingSessionWatches.size === 0) { return; }
     const now = Date.now();
+    console.log(`[Codedeck] resolvePendingWatches: checking ${this.pendingSessionWatches.size} pending watch(es)`);
     for (const [sessionId, watch] of [...this.pendingSessionWatches]) {
+      const age = Math.round((now - watch.registeredAt) / 1000);
       // Prune expired
       if (now - watch.registeredAt > SessionWatcher.PENDING_WATCH_TIMEOUT_MS) {
-        console.log(`[Codedeck] Pending watch expired for ${sessionId}`);
+        console.log(`[Codedeck] Pending watch expired for ${sessionId} after ${age}s`);
         this.pendingSessionWatches.delete(sessionId);
         continue;
       }
 
       const filePath = this.findJsonlForSession(sessionId);
       if (filePath) {
-        console.log(`[Codedeck] Pending watch resolved: ${sessionId}`);
+        console.log(`[Codedeck] Pending watch resolved: ${sessionId} after ${age}s at ${filePath}`);
         this.pendingSessionWatches.delete(sessionId);
         this.fileOffsets.set(filePath, 0);
         this.indexSession(filePath);
@@ -1545,6 +1564,8 @@ export class SessionWatcher implements vscode.Disposable {
         if (meta) {
           this.events.onNewSession?.(meta.sessionId, meta.cwd);
         }
+      } else {
+        console.log(`[Codedeck] Pending watch still waiting: ${sessionId} (${age}s elapsed)`);
       }
     }
 

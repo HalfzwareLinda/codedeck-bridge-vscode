@@ -235,6 +235,8 @@ export interface ClaudeJsonlUser {
   cwd: string;
   slug?: string;
   timestamp?: string;
+  version?: string;
+  permissionMode?: string;
   message: {
     role: 'user';
     content: ClaudeContentBlock[];

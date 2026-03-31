@@ -16,6 +16,7 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { NostrRelay, NostrRelayEvents } from './nostrRelay';
 import type { OutputEntry, RemoteSessionInfo, PairedPhone, UploadImageBlossomMessage, UploadImageChunkMessage } from './types';
+import { checkVersionCompat, MAX_TESTED_VERSION, MODE_CYCLE } from './compat';
 
 export interface BridgeCoreConfig {
   secretKey: Uint8Array;
@@ -376,7 +377,7 @@ export class BridgeCore {
    * Passive drift correction via onPermissionModeObserved() catches mismatches
    * when the next JSONL user entry eventually arrives.
    */
-  private static readonly MODE_CYCLE = ['plan', 'default', 'acceptEdits'];
+  private static readonly MODE_CYCLE = MODE_CYCLE;
   private static readonly SHIFT_TAB_DELAY_MS = 400;
   /** Delay after plan approval keypress before allowing Shift+Tab sequences. */
   private static readonly KEYPRESS_SETTLE_MS = 600;
@@ -402,6 +403,8 @@ export class BridgeCore {
   /** Timestamp of last drift-correction mode-confirmed publish per session. */
   private lastDriftCorrectionPublish: Map<string, number> = new Map();
   private static readonly DRIFT_CORRECTION_COOLDOWN_MS = 2_000;
+  /** Whether a version mismatch warning has already been shown this session. */
+  private versionWarningShown = false;
 
   /** Get the bridge's authoritative tracked mode for a session. */
   getTrackedMode(sessionId: string): string | undefined {
@@ -538,7 +541,7 @@ export class BridgeCore {
 
   /** Send the calculated number of Shift+Tab presses to go from fromMode to toMode. */
   private async sendShiftTabs(sessionId: string, fromMode: string, toMode: string, signal?: AbortSignal): Promise<'sent' | 'failed' | 'aborted'> {
-    const cycle = BridgeCore.MODE_CYCLE;
+    const cycle: readonly string[] = BridgeCore.MODE_CYCLE;
     const fromIndex = Math.max(0, cycle.indexOf(fromMode));
     const toIndex = cycle.indexOf(toMode);
     const steps = (toIndex - fromIndex + cycle.length) % cycle.length;
@@ -620,6 +623,19 @@ export class BridgeCore {
         }
         break;
       }
+    }
+  }
+
+  /**
+   * Called when a JSONL user entry reveals the Claude Code version.
+   * Logs a warning if the version hasn't been tested with this bridge.
+   */
+  onClaudeCodeVersionDetected(sessionId: string, version: string): void {
+    const compat = checkVersionCompat(version);
+    this.log(`[Codedeck] Claude Code v${version} detected for session ${sessionId} (${compat})`);
+    if (compat === 'untested' && !this.versionWarningShown) {
+      this.versionWarningShown = true;
+      this.log(`[Codedeck] WARNING: Claude Code v${version} has not been tested with this bridge version. Tested up to v${MAX_TESTED_VERSION}. Some features may not work correctly.`);
     }
   }
 

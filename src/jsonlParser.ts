@@ -12,19 +12,20 @@
 
 import * as path from 'path';
 import type { ClaudeJsonlLine, ClaudeContentBlock, OutputEntry } from './types';
+import { NEVER_NEEDS_PERMISSION, PLAN_MODE_AUTO_APPROVE } from './compat';
 
 // --- Permission detection ---
 
-/** Truly internal bookkeeping tools that Claude Code never prompts for
- *  under any permission configuration. Everything else is assumed to
- *  potentially prompt. The bridge uses same-batch detection (tool_use +
- *  tool_result in the same poll batch → auto-approved → skip injection)
- *  to avoid generating unnecessary permission_request events for tools
- *  like Read/Glob/Grep that are normally auto-approved but CAN be
- *  configured to require permission via custom rules. */
-const NEVER_NEEDS_PERMISSION = new Set([
-  'TodoWrite', 'TodoRead', 'TaskOutput', 'TaskStop',
-]);
+/** Extract the Claude Code version from a raw JSONL line (only present on user entries). */
+export function extractClaudeCodeVersion(line: string): string | undefined {
+  try {
+    const parsed = JSON.parse(line.trim());
+    if (parsed.type === 'user' && typeof parsed.version === 'string') {
+      return parsed.version;
+    }
+  } catch { /* ignore parse errors */ }
+  return undefined;
+}
 
 /** Extract the permissionMode field from a raw JSONL line (only present on user entries). */
 export function extractPermissionMode(line: string): string | undefined {
@@ -36,17 +37,6 @@ export function extractPermissionMode(line: string): string | undefined {
   } catch { /* ignore parse errors */ }
   return undefined;
 }
-
-/** Tools that are safe to auto-approve when in plan mode.
- *  Plan mode restricts Claude to read-only tools at the model level,
- *  so any tool it invokes during planning is safe to approve automatically.
- *  This lets the planning phase run uninterrupted without prompting the user. */
-const PLAN_MODE_AUTO_APPROVE = new Set([
-  'Read', 'Glob', 'Grep', 'Agent', 'WebSearch', 'WebFetch',
-  'AskUserQuestion', 'EnterPlanMode', 'Skill',
-  'TaskCreate', 'TaskUpdate', 'TaskList', 'TaskGet', 'TaskOutput',
-  'Bash', 'Write', 'Edit', 'ToolSearch',
-]);
 
 /** Check whether a tool might show a permission prompt.
  *  Uses a small denylist of truly internal tools. Everything else (including
