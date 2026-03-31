@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseJsonlLine, extractSessionMeta, resolveProjectFromCwd, extractPermissionMode, toolNeedsPermission } from '../jsonlParser';
+import { parseJsonlLine, extractSessionMeta, resolveProjectFromCwd, extractPermissionMode, extractModeFromToolUse, toolNeedsPermission } from '../jsonlParser';
 
 describe('parseJsonlLine', () => {
   it('returns empty for empty input', () => {
@@ -463,6 +463,58 @@ describe('extractPermissionMode', () => {
       const line = JSON.stringify({ type: 'user', uuid: 'u1', permissionMode: mode, message: { role: 'user', content: [] } });
       expect(extractPermissionMode(line)).toBe(mode);
     }
+  });
+});
+
+describe('extractModeFromToolUse', () => {
+  it('returns plan for EnterPlanMode tool_use', () => {
+    const line = JSON.stringify({
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'EnterPlanMode', input: {} }] },
+    });
+    expect(extractModeFromToolUse(line)).toBe('plan');
+  });
+
+  it('returns undefined for ExitPlanMode tool_use', () => {
+    const line = JSON.stringify({
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'ExitPlanMode', input: { plan: '# Plan' } }] },
+    });
+    expect(extractModeFromToolUse(line)).toBeUndefined();
+  });
+
+  it('returns undefined for generic tool_use', () => {
+    const line = JSON.stringify({
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'ls' } }] },
+    });
+    expect(extractModeFromToolUse(line)).toBeUndefined();
+  });
+
+  it('returns undefined for user entries', () => {
+    const line = JSON.stringify({
+      type: 'user',
+      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'Entered plan mode' }] },
+    });
+    expect(extractModeFromToolUse(line)).toBeUndefined();
+  });
+
+  it('returns undefined for invalid JSON', () => {
+    expect(extractModeFromToolUse('not json')).toBeUndefined();
+  });
+
+  it('returns plan when EnterPlanMode is among multiple content blocks', () => {
+    const line = JSON.stringify({
+      type: 'assistant',
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'Let me enter plan mode.' },
+          { type: 'tool_use', id: 't1', name: 'EnterPlanMode', input: {} },
+        ],
+      },
+    });
+    expect(extractModeFromToolUse(line)).toBe('plan');
   });
 });
 

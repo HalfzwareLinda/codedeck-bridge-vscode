@@ -12,7 +12,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { parseJsonlLine, extractSessionMeta, extractFirstUserMessage, resolveProjectFromCwd, extractPermissionMode, extractClaudeCodeVersion, toolNeedsPermission, shouldAutoApproveInPlanMode } from './jsonlParser';
+import { parseJsonlLine, extractSessionMeta, extractFirstUserMessage, resolveProjectFromCwd, extractPermissionMode, extractModeFromToolUse, extractClaudeCodeVersion, toolNeedsPermission, shouldAutoApproveInPlanMode } from './jsonlParser';
 import type { OutputEntry, RemoteSessionInfo } from './types';
 
 const MAX_HISTORY_PER_SESSION = 500;
@@ -777,6 +777,13 @@ export class SessionWatcher implements vscode.Disposable {
           if (mode !== 'plan' && mode !== 'default') {
             this.autoApproveQueue.clear(meta.sessionId);
           }
+        }
+
+        // Detect mode changes from tool_use (e.g., EnterPlanMode)
+        const toolMode = extractModeFromToolUse(line);
+        if (toolMode) {
+          this.permissionModes.set(meta.sessionId, toolMode);
+          this.events.onPermissionModeChanged?.(meta.sessionId, toolMode);
         }
 
         // Detect Claude Code version (only fires once per session)

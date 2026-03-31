@@ -38,6 +38,23 @@ export function extractPermissionMode(line: string): string | undefined {
   return undefined;
 }
 
+/** Detect mode-changing tool_use calls from assistant entries.
+ *  Returns 'plan' when EnterPlanMode is found.
+ *  Does NOT detect ExitPlanMode — that is handled via plan_approval flow. */
+export function extractModeFromToolUse(line: string): string | undefined {
+  try {
+    const parsed = JSON.parse(line.trim());
+    if (parsed.type === 'assistant' && Array.isArray(parsed.message?.content)) {
+      for (const block of parsed.message.content) {
+        if (block.type === 'tool_use' && block.name === 'EnterPlanMode') {
+          return 'plan';
+        }
+      }
+    }
+  } catch { /* ignore parse errors */ }
+  return undefined;
+}
+
 /** Check whether a tool might show a permission prompt.
  *  Uses a small denylist of truly internal tools. Everything else (including
  *  Read/Glob/Grep) is assumed to potentially prompt — the bridge's same-batch
