@@ -31,6 +31,7 @@ import { SESSION_LIST_EVENT_KIND, OUTPUT_EVENT_KIND } from './types';
 
 export interface NostrRelayEvents {
   onInput: (sessionId: string, text: string, phonePubkey: string) => void;
+  onQuestionInput: (sessionId: string, text: string, optionCount: number, phonePubkey: string) => void;
   onPermissionResponse: (sessionId: string, requestId: string, allow: boolean, modifier?: 'always' | 'never') => void;
   onKeypress: (sessionId: string, key: string, context?: 'plan-approval' | 'question') => void;
   onModeChange: (sessionId: string, mode: string) => void;
@@ -836,6 +837,10 @@ export class NostrRelay {
         case 'input':
           Promise.resolve(this.events.onInput(msg.sessionId, msg.text, event.pubkey))
             .catch(err => console.error('[Codedeck] onInput handler error:', err));
+          break;
+        case 'question-input':
+          Promise.resolve(this.events.onQuestionInput(msg.sessionId, msg.text, msg.optionCount, event.pubkey))
+            .catch(err => console.error('[Codedeck] onQuestionInput handler error:', err));
           break;
         case 'permission-res':
           Promise.resolve(this.events.onPermissionResponse(msg.sessionId, msg.requestId, msg.allow, msg.modifier))

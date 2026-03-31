@@ -51,6 +51,16 @@ export interface InputMessage {
   text: string;
 }
 
+/** Free-text answer to a pending AskUserQuestion. The bridge selects the
+ *  "Type something" Ink TUI option (keypress optionCount+1), waits for the
+ *  mode switch, then sends the text directly (no Escape workaround). */
+export interface QuestionInputMessage {
+  type: 'question-input';
+  sessionId: string;
+  text: string;
+  optionCount: number;
+}
+
 export interface PermissionResponseMessage {
   type: 'permission-res';
   sessionId: string;
@@ -202,7 +212,7 @@ export interface ModeConfirmedMessage {
 // --- Union ---
 
 export type BridgeOutbound = SessionListMessage | OutputMessage | HistoryResponseMessage | SessionPendingMessage | SessionReadyMessage | SessionFailedMessage | InputFailedMessage | CloseSessionAckMessage | SessionReplacedMessage | ModeConfirmedMessage;
-export type BridgeInbound = InputMessage | PermissionResponseMessage | KeypressMessage | ModeChangeMessage | HistoryRequestMessage | CreateSessionMessage | RefreshSessionsMessage | CloseSessionMessage | UploadImageMessage;
+export type BridgeInbound = InputMessage | QuestionInputMessage | PermissionResponseMessage | KeypressMessage | ModeChangeMessage | HistoryRequestMessage | CreateSessionMessage | RefreshSessionsMessage | CloseSessionMessage | UploadImageMessage;
 export type BridgeMessage = BridgeOutbound | BridgeInbound;
 
 // --- Nostr event kinds ---

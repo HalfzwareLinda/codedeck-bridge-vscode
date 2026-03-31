@@ -118,6 +118,33 @@ export class BridgeCore {
           });
         }
       },
+      onQuestionInput: async (sessionId, text, optionCount, _phonePubkey) => {
+        this.log(`[Codedeck] Question input for session ${sessionId} (${optionCount} options): ${text.slice(0, 50)}...`);
+
+        // Step 1: Send keypress for "Type something" (Ink TUI option N+1)
+        const typeOwnKey = String(optionCount + 1);
+        const keypressSent = await this.terminal.sendKeypress(typeOwnKey, sessionId);
+        if (!keypressSent) {
+          this.log(`[Codedeck] Question input failed — no terminal for keypress on ${sessionId}`);
+          this.terminal.notifyNoTerminal();
+          this.relay.publishInputFailed(sessionId, 'no-terminal').catch(err => {
+            console.error('[Codedeck] Failed to publish input-failed:', err);
+          });
+          return;
+        }
+
+        // Step 2: Wait for Ink TUI to switch from menu to text input mode
+        await new Promise(r => setTimeout(r, 500));
+
+        // Step 3: Send text directly (no Escape — already past the menu)
+        const sent = await this.terminal.sendTextDirect(text, sessionId);
+        if (!sent) {
+          this.terminal.notifyNoTerminal();
+          this.relay.publishInputFailed(sessionId, 'no-terminal').catch(err => {
+            console.error('[Codedeck] Failed to publish input-failed:', err);
+          });
+        }
+      },
       onCreateSession: async () => {
         const sessionId = crypto.randomUUID();
         this.log(`[Codedeck] Create session request received — spawning claude --session-id ${sessionId}`);
