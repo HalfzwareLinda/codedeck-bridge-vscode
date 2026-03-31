@@ -12,10 +12,11 @@
  */
 
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { NostrRelay, NostrRelayEvents } from './nostrRelay';
-import type { OutputEntry, RemoteSessionInfo, PairedPhone, UploadImageBlossomMessage, UploadImageChunkMessage } from './types';
+import type { OutputEntry, RemoteSessionInfo, PairedPhone, UploadImageBlossomMessage, UploadImageChunkMessage, EffortLevel } from './types';
 import { checkVersionCompat, MAX_TESTED_VERSION, MODE_CYCLE } from './compat';
 
 export interface BridgeCoreConfig {
@@ -146,7 +147,7 @@ export class BridgeCore {
           });
         }
       },
-      onCreateSession: async () => {
+      onCreateSession: async (defaultEffort) => {
         const sessionId = crypto.randomUUID();
         this.log(`[Codedeck] Create session request received — spawning claude --session-id ${sessionId}`);
 
@@ -186,6 +187,24 @@ export class BridgeCore {
           }
           // Session launched with --permission-mode plan, seed tracked mode to match
           this.trackedModes.set(sessionId, 'plan');
+
+          // Apply default effort level if specified (and not 'auto' which is Claude Code's default)
+          const effortLevel = (defaultEffort as EffortLevel | undefined) ?? undefined;
+          if (effortLevel && effortLevel !== 'auto') {
+            // Wait for Claude Code to fully initialize before sending /effort
+            await new Promise(resolve => setTimeout(resolve, 3_000));
+            const effortSent = await this.terminal.sendText(`/effort ${effortLevel}`, sessionId);
+            if (effortSent) {
+              this.trackedEffort.set(sessionId, effortLevel);
+              this.log(`[Codedeck] Applied default effort '${effortLevel}' to new session ${sessionId}`);
+            } else {
+              this.log(`[Codedeck] WARNING: Failed to apply default effort to new session ${sessionId}`);
+            }
+          } else {
+            // Seed with the machine's default effort level from settings
+            const machineDefault = this.readDefaultEffortLevel();
+            this.trackedEffort.set(sessionId, machineDefault);
+          }
         } catch (err) {
           this.log(`[Codedeck] Terminal spawn failed for ${sessionId}: ${err}`);
           await this.relay.publishSessionFailed(sessionId, 'terminal-failed');
@@ -296,6 +315,22 @@ export class BridgeCore {
           });
         }, 300));
       },
+      onEffortChange: async (sessionId, level) => {
+        this.log(`[Codedeck] Effort change for session ${sessionId}: ${level}`);
+        // Send /effort command to the terminal
+        const sent = await this.terminal.sendText(`/effort ${level}`, sessionId);
+        if (sent) {
+          this.trackedEffort.set(sessionId, level as EffortLevel);
+          this.relay.publishEffortConfirmed(sessionId, level).catch(err => {
+            this.log(`[Codedeck] Failed to publish effort-confirmed: ${err}`);
+          });
+        } else {
+          this.log(`[Codedeck] WARNING: Failed to send /effort ${level} to terminal for ${sessionId}`);
+          this.relay.publishInputFailed(sessionId, 'no-terminal').catch(err => {
+            console.error('[Codedeck] Failed to publish input-failed:', err);
+          });
+        }
+      },
       onHistoryRequest: (sessionId, afterSeq, phonePubkey) => {
         console.log(`[Codedeck] History request for ${sessionId} (afterSeq: ${afterSeq})`);
         if (!this.sessionProvider) { return; }
@@ -323,6 +358,7 @@ export class BridgeCore {
       onCloseSession: async (sessionId) => {
         this.log(`[Codedeck] Close session request for ${sessionId}`);
         this.trackedModes.delete(sessionId);
+        this.trackedEffort.delete(sessionId);
         this.modeQueue.delete(sessionId);
         this.pendingModeVerification.delete(sessionId);
         this.pendingRetryCount.delete(sessionId);
@@ -386,6 +422,8 @@ export class BridgeCore {
   private pendingRevisionSessions: Set<string> = new Set();
   /** Bridge-side tracked mode per session (authoritative for delta calculation). */
   private trackedModes: Map<string, string> = new Map();
+  /** Bridge-side tracked effort level per session (trust-and-confirm). */
+  private trackedEffort: Map<string, EffortLevel> = new Map();
   /** Serialization chain per session — prevents interleaved Shift+Tab sequences. */
   private modeQueue: Map<string, Promise<void>> = new Map();
   /** Per-session debounce timer for incoming mode changes (collapses rapid-fire requests). */
@@ -409,6 +447,24 @@ export class BridgeCore {
   /** Get the bridge's authoritative tracked mode for a session. */
   getTrackedMode(sessionId: string): string | undefined {
     return this.trackedModes.get(sessionId);
+  }
+
+  /** Get the bridge's tracked effort level for a session. */
+  getTrackedEffort(sessionId: string): EffortLevel | undefined {
+    return this.trackedEffort.get(sessionId);
+  }
+
+  /** Read the default effort level from ~/.claude/settings.json. */
+  private readDefaultEffortLevel(): EffortLevel {
+    try {
+      const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
+      const content = fs.readFileSync(settingsPath, 'utf-8');
+      const parsed = JSON.parse(content);
+      if (typeof parsed.effortLevel === 'string') {
+        return parsed.effortLevel as EffortLevel;
+      }
+    } catch { /* settings file may not exist */ }
+    return 'auto';
   }
 
   /**
@@ -576,14 +632,24 @@ export class BridgeCore {
 
   /** Called when session list changes (new/deleted sessions). */
   onSessionListChanged(sessions: RemoteSessionInfo[]): void {
-    // Seed trackedModes for sessions not yet tracked (e.g., after extension reload)
+    // Seed trackedModes and trackedEffort for sessions not yet tracked (e.g., after extension reload)
+    const defaultEffort = this.readDefaultEffortLevel();
     for (const s of sessions) {
       if (!this.trackedModes.has(s.id)) {
         this.trackedModes.set(s.id, s.permissionMode ?? 'default');
       }
+      if (!this.trackedEffort.has(s.id)) {
+        this.trackedEffort.set(s.id, defaultEffort);
+      }
     }
 
-    this.relay.publishSessionList(sessions).catch(err => {
+    // Enrich sessions with tracked effort level before publishing
+    const enriched = sessions.map(s => ({
+      ...s,
+      effortLevel: this.trackedEffort.get(s.id) ?? defaultEffort,
+    }));
+
+    this.relay.publishSessionList(enriched).catch(err => {
       console.error('[Codedeck] Failed to publish session list:', err);
     });
   }
@@ -615,6 +681,11 @@ export class BridgeCore {
           if (oldMode) {
             this.trackedModes.set(sessionId, oldMode);
             this.trackedModes.delete(oldSessionId);
+          }
+          const oldEffort = this.trackedEffort.get(oldSessionId);
+          if (oldEffort) {
+            this.trackedEffort.set(sessionId, oldEffort);
+            this.trackedEffort.delete(oldSessionId);
           }
           // Notify phones so they can swap the session in their UI
           this.relay.publishSessionReplaced(oldSessionId, newSession).catch(err => {

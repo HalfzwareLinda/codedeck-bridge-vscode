@@ -88,6 +88,11 @@ export const PLAN_APPROVAL_KEYS = {
 /** The order Claude Code cycles through modes on Shift+Tab. */
 export const MODE_CYCLE = ['plan', 'default', 'acceptEdits'] as const;
 
+// --- Effort levels ---
+
+/** Available effort levels for Claude Code's `/effort` command. */
+export const EFFORT_LEVELS = ['auto', 'low', 'medium', 'high', 'max'] as const;
+
 // --- Tool classification ---
 
 /** Truly internal bookkeeping tools that Claude Code never prompts for

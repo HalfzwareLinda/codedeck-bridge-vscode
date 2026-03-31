@@ -35,8 +35,9 @@ export interface NostrRelayEvents {
   onPermissionResponse: (sessionId: string, requestId: string, allow: boolean, modifier?: 'always' | 'never') => void;
   onKeypress: (sessionId: string, key: string, context?: 'plan-approval' | 'question') => void;
   onModeChange: (sessionId: string, mode: string) => void;
+  onEffortChange: (sessionId: string, level: string) => void;
   onHistoryRequest: (sessionId: string, afterSeq: number | undefined, phonePubkey: string) => void;
-  onCreateSession: () => void;
+  onCreateSession: (defaultEffort?: string) => void;
   onRefreshSessions: () => void;
   onCloseSession: (sessionId: string) => void;
   onUploadImage: (msg: import('./types').UploadImageMessage, phonePubkey: string) => void;
@@ -678,6 +679,16 @@ export class NostrRelay {
     return this.publishToAllPhones(msg, 30);
   }
 
+  async publishEffortConfirmed(sessionId: string, level: string): Promise<boolean> {
+    const msg: import('./types').EffortConfirmedMessage = {
+      type: 'effort-confirmed',
+      sessionId,
+      level: level as import('./types').EffortLevel,
+    };
+    this.log(`[Codedeck] Publishing effort-confirmed: session=${sessionId}, level=${level}`);
+    return this.publishToAllPhones(msg, 30);
+  }
+
   private static readonly HISTORY_CHUNK_SIZE = 20;
   private static readonly MAX_CHUNK_JSON_BYTES = 48_000;
   private static readonly CHUNK_DELAY_MS = 500;
@@ -854,11 +865,15 @@ export class NostrRelay {
           Promise.resolve(this.events.onModeChange(msg.sessionId, msg.mode))
             .catch(err => console.error('[Codedeck] onModeChange handler error:', err));
           break;
+        case 'effort':
+          Promise.resolve(this.events.onEffortChange(msg.sessionId, msg.level))
+            .catch(err => console.error('[Codedeck] onEffortChange handler error:', err));
+          break;
         case 'history-request':
           this.events.onHistoryRequest(msg.sessionId, msg.afterSeq, event.pubkey);
           break;
         case 'create-session':
-          Promise.resolve(this.events.onCreateSession())
+          Promise.resolve(this.events.onCreateSession(msg.defaultEffort))
             .catch(err => this.log(`[Codedeck] onCreateSession handler error: ${err}`));
           break;
         case 'refresh-sessions':

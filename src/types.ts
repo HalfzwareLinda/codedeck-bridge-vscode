@@ -17,6 +17,7 @@ export interface RemoteSessionInfo {
   project: string;
   hasTerminal?: boolean;
   permissionMode?: PermissionMode;
+  effortLevel?: EffortLevel;
 }
 
 export interface SessionListMessage {
@@ -79,11 +80,18 @@ export interface KeypressMessage {
 }
 
 export type PermissionMode = 'default' | 'acceptEdits' | 'plan';
+export type EffortLevel = 'low' | 'medium' | 'high' | 'max' | 'auto';
 
 export interface ModeChangeMessage {
   type: 'mode';
   sessionId: string;
   mode: PermissionMode;
+}
+
+export interface EffortChangeMessage {
+  type: 'effort';
+  sessionId: string;
+  level: EffortLevel;
 }
 
 // --- History catch-up (phone → bridge → phone) ---
@@ -110,6 +118,7 @@ export interface HistoryResponseMessage {
 
 export interface CreateSessionMessage {
   type: 'create-session';
+  defaultEffort?: EffortLevel;
 }
 
 // --- Refresh sessions (phone → bridge) ---
@@ -209,10 +218,18 @@ export interface ModeConfirmedMessage {
   mode: PermissionMode;
 }
 
+// --- Effort confirmation (bridge → phone) ---
+
+export interface EffortConfirmedMessage {
+  type: 'effort-confirmed';
+  sessionId: string;
+  level: EffortLevel;
+}
+
 // --- Union ---
 
-export type BridgeOutbound = SessionListMessage | OutputMessage | HistoryResponseMessage | SessionPendingMessage | SessionReadyMessage | SessionFailedMessage | InputFailedMessage | CloseSessionAckMessage | SessionReplacedMessage | ModeConfirmedMessage;
-export type BridgeInbound = InputMessage | QuestionInputMessage | PermissionResponseMessage | KeypressMessage | ModeChangeMessage | HistoryRequestMessage | CreateSessionMessage | RefreshSessionsMessage | CloseSessionMessage | UploadImageMessage;
+export type BridgeOutbound = SessionListMessage | OutputMessage | HistoryResponseMessage | SessionPendingMessage | SessionReadyMessage | SessionFailedMessage | InputFailedMessage | CloseSessionAckMessage | SessionReplacedMessage | ModeConfirmedMessage | EffortConfirmedMessage;
+export type BridgeInbound = InputMessage | QuestionInputMessage | PermissionResponseMessage | KeypressMessage | ModeChangeMessage | EffortChangeMessage | HistoryRequestMessage | CreateSessionMessage | RefreshSessionsMessage | CloseSessionMessage | UploadImageMessage;
 export type BridgeMessage = BridgeOutbound | BridgeInbound;
 
 // --- Nostr event kinds ---
