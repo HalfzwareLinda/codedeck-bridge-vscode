@@ -83,6 +83,7 @@
 - [x] **CDB-007: Harden mode-confirmed** — No-op confirm, failure revert, plan approval, dedup bypass (`910df1f`, 2026-03-29)
 - [x] **CDB-008: Cancellable auto-approve keypresses** — Auto-approve keypresses are now cancellable and pause-aware (`dca57eb`, 2026-03-29)
 - [x] **CDB-009: Eliminate bypassPermissions mode** — Removed bypassPermissions entirely, use default + auto-approve (`b0e26dd`, 2026-03-29)
+- [x] **CDB-011: Detect autonomous plan mode entry via EnterPlanMode tool_use** — Phone UI stayed in "EDITS" when Claude Code autonomously entered plan mode. Added `extractModeFromToolUse()` to detect EnterPlanMode and fire `mode-confirmed` (`e9f2de9`, 2026-03-31)
 
 ## Blossom Image Transfer (2026-03-04 — 2026-03-08)
 
