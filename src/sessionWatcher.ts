@@ -1626,6 +1626,23 @@ export class SessionWatcher implements vscode.Disposable {
         // File gone
       }
     }
+    // Include sessions that have a terminal but no JSONL yet (pending watches).
+    // Without this, a session-list published before the JSONL appears would omit
+    // the new session, causing the phone to drop it from the UI.
+    for (const [sessionId, { cwd, registeredAt }] of this.pendingSessionWatches) {
+      if (!sessions.some(s => s.id === sessionId)) {
+        sessions.push({
+          id: sessionId,
+          slug: `session-${sessionId.slice(0, 8)}`,
+          cwd: cwd ?? this.workspaceCwd ?? '',
+          lastActivity: new Date(registeredAt).toISOString(),
+          lineCount: 0,
+          title: null,
+          project: cwd ? cwd.split('/').pop() || cwd : 'Starting...',
+        });
+      }
+    }
+
     // Deduplicate by sessionId — multiple JSONL files can share the same sessionId
     // (e.g. when Claude Code resumes a session). Keep the most recently modified file.
     const deduped = new Map<string, RemoteSessionInfo>();
