@@ -7,6 +7,8 @@
 ## Permissions
 
 - [ ] **CDB-002: Consider `--dangerously-skip-permissions` CLI flag** — For sessions that start in default (YOLO) mode, spawn Claude with `--dangerously-skip-permissions` instead of using the bridge auto-approve approach. Eliminates race conditions and latency from keypress-based auto-approval. Can't be toggled mid-session (requires process restart), so keep bridge auto-approve fallback for mid-session switches.
+- [ ] **CDB-014: Re-test permission scorecard after CDB-013 fix** — Run the Plan Mode and Accept Edits scorecards from the phone to verify: Plan mode prompts for Write/Edit, Accept Edits auto-approves Write/Edit but prompts for Bash/WebSearch/Agent.
+- [ ] **CDB-015: Test tool approvals across all three build modes** — Systematically test which tools get auto-approved vs prompted across Plan Mode, Accept Edits, and Full Auto (YOLO) modes. Verify each mode's approval matrix matches expected behavior for Read/Glob/Grep, Write/Edit, Bash, WebSearch, and Agent tools.
 
 ## Relay Hygiene (NIP-40 Expiration)
 
