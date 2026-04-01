@@ -247,31 +247,43 @@ export class BridgeCore {
         // permissionMode field only appears on the next user entry. Without
         // preemptive tracking, subsequent mode switches calculate wrong Shift+Tab deltas.
         //
-        // Only apply plan approval logic when context is 'plan-approval' or
-        // undefined (backward compat with older phone versions that don't send context).
+        // Only apply plan approval logic when context is 'plan-approval',
+        // 'exit-plan', or undefined (backward compat with older phone versions).
         // When context is 'question', skip entirely — the keypress is answering
         // an AskUserQuestion, not approving a plan.
         let planApprovalMode: string | undefined;
 
         if (this.trackedModes.get(sessionId) === 'plan' && context !== 'question') {
-          switch (key) {
-            case '1':
-              // Approve (auto-accept edits)
-              this.trackedModes.set(sessionId, 'acceptEdits');
-              planApprovalMode = 'acceptEdits';
-              this.log(`[Codedeck] Plan option 1 — tracked mode → acceptEdits for ${sessionId}`);
-              break;
-            case '2':
-              // Approve (manual edits)
+          if (context === 'exit-plan') {
+            // Simple "Exit plan mode? 1. Yes 2. No" — no plan was proposed
+            if (key === '1') {
               this.trackedModes.set(sessionId, 'default');
               planApprovalMode = 'default';
-              this.log(`[Codedeck] Plan option 2 — tracked mode → default for ${sessionId}`);
-              break;
-            case '3':
-              // Revise plan — stays in plan mode, next input is a revision (skip Escape)
-              this.pendingRevisionSessions.add(sessionId);
-              this.log(`[Codedeck] Plan option 3 — next input for ${sessionId} is a revision`);
-              break;
+              this.log(`[Codedeck] Exit-plan Yes — tracked mode → default for ${sessionId}`);
+            } else {
+              this.log(`[Codedeck] Exit-plan No — staying in plan mode for ${sessionId}`);
+            }
+          } else {
+            // Full plan approval: 1=acceptEdits, 2=default, 3=revise
+            switch (key) {
+              case '1':
+                // Approve (auto-accept edits)
+                this.trackedModes.set(sessionId, 'acceptEdits');
+                planApprovalMode = 'acceptEdits';
+                this.log(`[Codedeck] Plan option 1 — tracked mode → acceptEdits for ${sessionId}`);
+                break;
+              case '2':
+                // Approve (manual edits)
+                this.trackedModes.set(sessionId, 'default');
+                planApprovalMode = 'default';
+                this.log(`[Codedeck] Plan option 2 — tracked mode → default for ${sessionId}`);
+                break;
+              case '3':
+                // Revise plan — stays in plan mode, next input is a revision (skip Escape)
+                this.pendingRevisionSessions.add(sessionId);
+                this.log(`[Codedeck] Plan option 3 — next input for ${sessionId} is a revision`);
+                break;
+            }
           }
         }
 

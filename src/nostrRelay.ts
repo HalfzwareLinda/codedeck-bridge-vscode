@@ -33,7 +33,7 @@ export interface NostrRelayEvents {
   onInput: (sessionId: string, text: string, phonePubkey: string) => void;
   onQuestionInput: (sessionId: string, text: string, optionCount: number, phonePubkey: string) => void;
   onPermissionResponse: (sessionId: string, requestId: string, allow: boolean, modifier?: 'always' | 'never') => void;
-  onKeypress: (sessionId: string, key: string, context?: 'plan-approval' | 'question') => void;
+  onKeypress: (sessionId: string, key: string, context?: 'plan-approval' | 'exit-plan' | 'question') => void;
   onModeChange: (sessionId: string, mode: string) => void;
   onEffortChange: (sessionId: string, level: string) => void;
   onHistoryRequest: (sessionId: string, afterSeq: number | undefined, phonePubkey: string) => void;

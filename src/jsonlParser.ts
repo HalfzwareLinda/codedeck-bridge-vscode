@@ -155,12 +155,14 @@ function parseAssistantLine(line: {
             metadata: { role: 'assistant', model: line.message.model, special: 'plan', tool_use_id: block.id },
           });
         }
-        // Emit plan approval signal
+        // Emit plan approval signal.
+        // has_plan distinguishes "approve this plan" (3-option) from
+        // "exit plan mode?" (2-option yes/no) on the phone UI.
         entries.push({
           entryType: 'system',
-          content: 'Plan approval needed',
+          content: plan ? 'Plan approval needed' : 'Exit plan mode?',
           timestamp: ts,
-          metadata: { special: 'plan_approval', tool_use_id: block.id },
+          metadata: { special: 'plan_approval', has_plan: !!plan, tool_use_id: block.id },
         });
       } else if (block.name === 'AskUserQuestion') {
         // Emit each question as an interactive entry
