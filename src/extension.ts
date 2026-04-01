@@ -250,6 +250,15 @@ export function activate(context: vscode.ExtensionContext): void {
     statusBar.setReady(0);
   }
 
+  // --- Heartbeat: re-publish session list every 60s so phones can detect staleness ---
+  const heartbeatInterval = setInterval(() => {
+    if (bridgeCore?.relay.isConnected() && sessionWatcher) {
+      const sessions = enrichWithTerminalStatus(sessionWatcher.getSessions());
+      bridgeCore.onSessionListChanged(sessions);
+    }
+  }, 60_000);
+  context.subscriptions.push({ dispose: () => clearInterval(heartbeatInterval) });
+
   // --- Check installed Claude Code version at startup ---
   const claudeCodeExt = vscode.extensions.getExtension(CLAUDE_CODE_EXTENSION_ID);
   if (claudeCodeExt) {
@@ -467,6 +476,14 @@ export async function deactivate(): Promise<void> {
   const ts = bridgeCore?.relay.lastSeenTimestamp;
   if (ts && ts > 0 && extensionContext) {
     await extensionContext.globalState.update('codedeck_lastSeenTimestamp', ts);
+  }
+  // Publish empty session list to signal clean shutdown to phones
+  if (bridgeCore?.relay.isConnected()) {
+    try {
+      await bridgeCore.relay.publishSessionListImmediate([]);
+    } catch (err) {
+      console.warn('[Codedeck] Failed to publish offline signal:', err);
+    }
   }
   bridgeCore?.relay.dispose();
   sessionWatcher?.dispose();

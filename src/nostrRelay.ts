@@ -306,6 +306,22 @@ export class NostrRelay {
     });
   }
 
+  /**
+   * Publish session list immediately, bypassing the 500ms debounce.
+   * Used for shutdown signaling where the extension host may exit imminently.
+   */
+  async publishSessionListImmediate(sessions: RemoteSessionInfo[]): Promise<void> {
+    if (!this.pool || this.pairedPhones.length === 0) { return; }
+    // Cancel any pending debounced publish
+    if (this.publishDebounceTimer) {
+      clearTimeout(this.publishDebounceTimer);
+      this.publishDebounceTimer = null;
+      this.pendingPublishSessions = null;
+      this.publishDebounceCount = 0;
+    }
+    await this.doPublishSessionList(sessions);
+  }
+
   /** Publish with retry logic. */
   private async doPublishSessionListWithRetry(sessions: RemoteSessionInfo[]): Promise<void> {
     // Pause output flushing so session list gets relay bandwidth priority
