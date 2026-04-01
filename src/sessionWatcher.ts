@@ -606,7 +606,7 @@ export class SessionWatcher implements vscode.Disposable {
     return lines;
   }
 
-  private indexSession(filePath: string): void {
+  private indexSession(filePath: string, skipExisting: boolean = true): void {
     // Skip subagent sessions
     if (filePath.includes('/subagents/')) { return; }
 
@@ -617,9 +617,11 @@ export class SessionWatcher implements vscode.Disposable {
       if (meta) {
         const title = extractFirstUserMessage(lines);
         this.sessionMeta.set(filePath, { ...meta, title });
-        // Set offset to current file size (don't replay old content)
-        const stat = fs.statSync(filePath);
-        this.fileOffsets.set(filePath, stat.size);
+        if (skipExisting) {
+          // Set offset to current file size (don't replay old content)
+          const stat = fs.statSync(filePath);
+          this.fileOffsets.set(filePath, stat.size);
+        }
       }
     } catch (err) {
       console.log(`[Codedeck] indexSession failed for ${path.basename(filePath)}: ${err}`);
@@ -655,7 +657,7 @@ export class SessionWatcher implements vscode.Disposable {
     this.pendingSessionWatches.delete(sessionId);
 
     this.fileOffsets.set(filePath, 0);
-    this.indexSession(filePath);
+    this.indexSession(filePath, /* skipExisting */ !hasPendingWatch);
     this.emitSessionList();
 
     const meta = this.sessionMeta.get(filePath);
@@ -1570,7 +1572,7 @@ export class SessionWatcher implements vscode.Disposable {
         console.log(`[Codedeck] Pending watch resolved: ${sessionId} after ${age}s at ${filePath}`);
         this.pendingSessionWatches.delete(sessionId);
         this.fileOffsets.set(filePath, 0);
-        this.indexSession(filePath);
+        this.indexSession(filePath, /* skipExisting */ false);
         this.readNewLines(filePath);
         this.emitSessionList();
 
