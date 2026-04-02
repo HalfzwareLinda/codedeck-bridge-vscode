@@ -96,7 +96,7 @@ class AutoApproveQueue {
    * If retries are exhausted, returns `exhausted` info so the caller can emit
    * a fallback permission card to the phone.
    */
-  drain(sessionId: string, resolvedIds: Set<string>): DrainResult {
+  drain(sessionId: string, resolvedIds: Set<string>, retryEnabled: boolean = true): DrainResult {
     const inf = this.inflight.get(sessionId);
     if (!inf) { return { next: null }; }
 
@@ -105,22 +105,27 @@ class AutoApproveQueue {
 
     if (!resolved && !stale) { return { next: null }; }
 
-    // Stale but retries remain — retry the same keypress
-    if (stale && inf.retryCount < AUTO_APPROVE_MAX_RETRIES) {
+    // Stale but retries remain — retry the same keypress (only when retry is enabled)
+    if (retryEnabled && stale && inf.retryCount < AUTO_APPROVE_MAX_RETRIES) {
       inf.retryCount++;
       inf.inflightSince = Date.now();
       console.log(`[Codedeck] Auto-approve stale: ${inf.toolUseId} for ${sessionId} — retry ${inf.retryCount}/${AUTO_APPROVE_MAX_RETRIES}`);
       return { next: { toolUseId: inf.toolUseId, toolName: inf.toolName, enqueuedAt: inf.inflightSince } };
     }
 
-    // Retries exhausted — capture info for fallback card
+    // When retry is disabled and tool is stale but not resolved, give up and advance queue
+    if (!retryEnabled && stale) {
+      console.log(`[Codedeck] Auto-approve stale: ${inf.toolUseId} for ${sessionId} — retry disabled, advancing queue`);
+    }
+
+    // Retries exhausted (or retry disabled) — capture info for fallback card
     let exhausted: ExhaustedAutoApprove | undefined;
-    if (stale) {
+    if (retryEnabled && stale) {
       console.log(`[Codedeck] Auto-approve stale: ${inf.toolUseId} for ${sessionId} — giving up after ${AUTO_APPROVE_MAX_RETRIES} retries`);
       exhausted = { toolUseId: inf.toolUseId, toolName: inf.toolName };
     }
 
-    // In-flight is done (resolved or exhausted retries) — pop next
+    // In-flight is done (resolved or exhausted/skipped retries) — pop next
     const q = this.queues.get(sessionId);
     if (!q || q.length === 0) {
       this.inflight.delete(sessionId);
@@ -297,8 +302,12 @@ export class SessionWatcher implements vscode.Disposable {
    */
   shouldAcceptNewFile?: (sessionId: string, cwd: string) => boolean;
 
-  constructor(events: SessionWatcherEvents, workspaceCwd?: string) {
+  /** When false, the retry timer and drain() retry branch are skipped. */
+  private autoApproveRetry: boolean;
+
+  constructor(events: SessionWatcherEvents, workspaceCwd?: string, autoApproveRetry: boolean = true) {
     this.events = events;
+    this.autoApproveRetry = autoApproveRetry;
     this.claudeDir = path.join(os.homedir(), '.claude', 'projects');
     this.workspaceCwd = workspaceCwd;
   }
@@ -332,6 +341,11 @@ export class SessionWatcher implements vscode.Disposable {
     this.autoApproveRetryInterval = setInterval(() => this.retryStaleAutoApprovals(), 500);
 
     console.log(`[Codedeck] Watching ${this.claudeDir} for session changes`);
+  }
+
+  /** Update auto-approve retry at runtime (hot-reload from settings). */
+  setAutoApproveRetry(enabled: boolean): void {
+    this.autoApproveRetry = enabled;
   }
 
   /**
@@ -858,7 +872,7 @@ export class SessionWatcher implements vscode.Disposable {
       // Drain the auto-approve queue: if the in-flight tool's result just arrived,
       // fire the keypress for the next queued tool. If retries exhausted, emit
       // a fallback permission card so the phone can handle it manually.
-      const drainResult = this.autoApproveQueue.drain(meta.sessionId, resolved);
+      const drainResult = this.autoApproveQueue.drain(meta.sessionId, resolved, this.autoApproveRetry);
       if (drainResult.exhausted) {
         const { toolUseId, toolName } = drainResult.exhausted;
         console.log(`[Codedeck] Auto-approve exhausted for ${toolName} (id=${toolUseId}) — emitting fallback permission card`);
@@ -1116,6 +1130,7 @@ export class SessionWatcher implements vscode.Disposable {
    *  still happen even when the file is idle.
    *  When retries are exhausted, emits a fallback permission card to the phone. */
   private retryStaleAutoApprovals(): void {
+    if (!this.autoApproveRetry) return;
     const { retryable, exhausted } = this.autoApproveQueue.findStale();
     this.autoApproveQueue.markRetried(retryable);
     for (const { sessionId, toolUseId, toolName } of retryable) {
@@ -1284,7 +1299,7 @@ export class SessionWatcher implements vscode.Disposable {
       // Immediately drain the parent queue — don't wait for the next parent
       // JSONL read or stale retry. Without this, queued tools behind a subagent
       // tool wait up to 3s (stale timer) before the next keypress fires.
-      const drainResult = this.autoApproveQueue.drain(parentSessionId, resolved);
+      const drainResult = this.autoApproveQueue.drain(parentSessionId, resolved, this.autoApproveRetry);
       if (drainResult.exhausted) {
         const { toolUseId, toolName } = drainResult.exhausted;
         console.log(`[Codedeck] Auto-approve exhausted after subagent drain for ${toolName} (id=${toolUseId}) — emitting fallback permission card`);

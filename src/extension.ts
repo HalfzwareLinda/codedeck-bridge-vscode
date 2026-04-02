@@ -53,6 +53,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const config = vscode.workspace.getConfiguration('codedeck');
   const relays = config.get<string[]>('relays', ['wss://relay2.descendant.io', 'wss://relay.primal.net', 'wss://relay.nostr.band', 'wss://nos.lol']);
   const machineName = config.get<string>('machineName', '') || os.hostname();
+  const autoApproveRetry = config.get<boolean>('autoApproveRetry', true);
 
   // --- Load paired phones ---
   const pairedPhones = loadPairedPhones(context);
@@ -180,7 +181,7 @@ export function activate(context: vscode.ExtensionContext): void {
     onClaudeCodeVersionDetected: (sessionId, version) => {
       bridgeCore?.onClaudeCodeVersionDetected(sessionId, version);
     },
-  }, workspaceCwd);
+  }, workspaceCwd, autoApproveRetry);
   context.subscriptions.push(sessionWatcher);
 
   // --- Terminal-first wiring ---
@@ -454,6 +455,11 @@ export function activate(context: vscode.ExtensionContext): void {
         statusBar?.setConnecting();
         bridgeCore?.relay.updateRelays(newRelays);
         console.log('[Codedeck] Relays updated:', newRelays);
+      }
+      if (e.affectsConfiguration('codedeck.autoApproveRetry')) {
+        const enabled = vscode.workspace.getConfiguration('codedeck').get<boolean>('autoApproveRetry', true);
+        sessionWatcher?.setAutoApproveRetry(enabled);
+        console.log('[Codedeck] Auto-approve retry:', enabled ? 'enabled' : 'disabled');
       }
     }),
   );

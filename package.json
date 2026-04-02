@@ -54,6 +54,11 @@
           "type": "string",
           "default": "",
           "description": "Display name for this machine (defaults to hostname)"
+        },
+        "codedeck.autoApproveRetry": {
+          "type": "boolean",
+          "default": true,
+          "description": "Retry auto-approve keypresses when tool calls aren't accepted within 1.5s (disable if excess '1' characters appear in terminal)"
         }
       }
     }
