@@ -55,6 +55,11 @@
           "default": "",
           "description": "Display name for this machine (defaults to hostname)"
         },
+        "codedeck.blossomServer": {
+          "type": "string",
+          "default": "https://blossom.descendant.io",
+          "description": "Blossom server URL for encrypted image exchange"
+        },
         "codedeck.autoApproveRetry": {
           "type": "boolean",
           "default": true,

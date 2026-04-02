@@ -328,6 +328,7 @@ export interface PairingInfo {
   npub: string;
   relays: string[];
   machine: string;
+  blossomServer: string;
 }
 
 export interface PairedPhone {

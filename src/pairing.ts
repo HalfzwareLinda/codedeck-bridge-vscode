@@ -5,7 +5,7 @@
  * The phone scans this QR to establish the encrypted channel.
  *
  * QR payload format:
- *   codedeck://pair?npub=<npub>&relays=<comma-separated>&machine=<hostname>
+ *   codedeck://pair?npub=<npub>&relays=<comma-separated>&machine=<hostname>&blossom=<url>
  */
 
 import * as vscode from 'vscode';
@@ -29,7 +29,7 @@ export function showPairingPanel(
   );
 
   const relaysParam = pairingInfo.relays.map(r => encodeURIComponent(r)).join(',');
-  const pairingUrl = `codedeck://pair?npub=${pairingInfo.npub}&relays=${relaysParam}&machine=${encodeURIComponent(pairingInfo.machine)}`;
+  const pairingUrl = `codedeck://pair?npub=${pairingInfo.npub}&relays=${relaysParam}&machine=${encodeURIComponent(pairingInfo.machine)}&blossom=${encodeURIComponent(pairingInfo.blossomServer)}`;
 
   panel.webview.html = getPairingHtml(pairingUrl, pairingInfo);
 
@@ -140,11 +140,12 @@ function getPairingHtml(pairingUrl: string, info: PairingInfo): string {
 
   <p><strong>Machine:</strong> ${escapeHtml(info.machine)}</p>
   <p><strong>Relays:</strong> ${info.relays.map(escapeHtml).join(', ')}</p>
+  <p><strong>Blossom:</strong> ${escapeHtml(info.blossomServer)}</p>
 
   <div class="section">
-    <h2>Manual Pairing</h2>
+    <h2>Complete Pairing</h2>
     <p class="info" style="text-align: left;">
-      If you can't scan the QR code, paste the phone's npub below:
+      After the phone scans the QR code, enter the phone's npub here to complete two-way verification:
     </p>
     <input id="phoneNpub" placeholder="npub1..." />
     <input id="phoneLabel" placeholder="Phone label (e.g., My Pixel)" />
