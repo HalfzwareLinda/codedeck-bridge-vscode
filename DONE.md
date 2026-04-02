@@ -86,6 +86,11 @@
 - [x] **CDB-011: Detect autonomous plan mode entry via EnterPlanMode tool_use** — Phone UI stayed in "EDITS" when Claude Code autonomously entered plan mode. Added `extractModeFromToolUse()` to detect EnterPlanMode and fire `mode-confirmed` (`e9f2de9`, 2026-03-31)
 - [x] **CDB-013: Correct auto-approve tool lists per permission mode** — Plan mode was auto-approving Write/Edit (should prompt). Accept Edits mode had no auto-approve (should auto-approve reads + edits). Added `ACCEPT_EDITS_AUTO_APPROVE` set and acceptEdits branch in `injectPermissionRequests()` (`337993e`, 2026-03-31)
 
+## Pairing Improvements (2026-04-02)
+
+- [x] **CDB-016: Include Blossom server in pairing URL** — Added `&blossom=` param to QR code URL and new `codedeck.blossomServer` VSCode setting so phone auto-configures Blossom during pairing (`dbc44e7`, 2026-04-02)
+- [x] **CDB-017: Fix "Manual Pairing" wording** — Renamed section to "Complete Pairing" with text explaining the always-required two-way npub verification step (`dbc44e7`, 2026-04-02)
+
 ## Blossom Image Transfer (2026-03-04 — 2026-03-08)
 
 - [x] **Blossom encrypted image downloads** — Support alongside legacy chunk transfer (`d9fe3b3`, 2026-03-04)
