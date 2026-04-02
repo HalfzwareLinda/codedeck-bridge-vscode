@@ -52,6 +52,7 @@ export function activate(context: vscode.ExtensionContext): void {
   // --- Read configuration ---
   const config = vscode.workspace.getConfiguration('codedeck');
   const relays = config.get<string[]>('relays', ['wss://relay2.descendant.io', 'wss://relay.primal.net', 'wss://relay.nostr.band', 'wss://nos.lol']);
+  const blossomServer = config.get<string>('blossomServer', 'https://blossom.descendant.io');
   const machineName = config.get<string>('machineName', '') || os.hostname();
   const autoApproveRetry = config.get<boolean>('autoApproveRetry', true);
 
@@ -161,12 +162,20 @@ export function activate(context: vscode.ExtensionContext): void {
       if (existing) clearTimeout(existing);
       // Hold output flush briefly so tool_use + tool_result arrive together on phone
       bridgeCore?.relay.setAutoApproveHoldoff(500);
-      // Short delay gives Claude Code time to render the permission prompt
-      // after writing tool_use to JSONL — avoids lost keypresses under load.
+      // Delay gives Claude Code time to render the permission prompt after
+      // writing tool_use to JSONL, and lets fast tools write their tool_result
+      // before we send the keypress (prevents ghost "1"s in the terminal).
       const timer = setTimeout(() => {
         pendingAutoApproveTimers.delete(toolUseId);
+        // Fresh JSONL read to catch fast tool completions
+        sessionWatcher?.readNewLinesForSession(sessionId);
+        // Guard: skip if tool already resolved (no permission prompt showing)
+        if (sessionWatcher?.isToolResolved(sessionId, toolUseId)) {
+          log(`[Codedeck] Skipping keypress for ${toolName} (id=${toolUseId}) — already resolved`);
+          return;
+        }
         terminalRegistry.sendKeypress('1', sessionId);
-      }, 50);
+      }, 300);
       pendingAutoApproveTimers.set(toolUseId, timer);
     },
     onCancelAutoApprove: (toolUseId) => {
@@ -287,6 +296,7 @@ export function activate(context: vscode.ExtensionContext): void {
         npub: bridgeCore.relay.npub,
         relays,
         machine: machineName,
+        blossomServer,
       },
       async (pubkeyInput: string, label: string) => {
         // Decode npub if needed

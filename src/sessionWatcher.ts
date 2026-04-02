@@ -1684,6 +1684,16 @@ export class SessionWatcher implements vscode.Disposable {
     return this.resolvedToolIds.get(sessionId)?.has(toolUseId) ?? false;
   }
 
+  /** Force a fresh JSONL read for a session so resolvedToolIds is up-to-date. */
+  readNewLinesForSession(sessionId: string): void {
+    for (const [filePath, meta] of this.sessionMeta) {
+      if (meta.sessionId === sessionId) {
+        this.readNewLines(filePath);
+        return;
+      }
+    }
+  }
+
   private emitSessionList(): void {
     // Debounce: coalesce rapid-fire calls (e.g. during startup scan) into one publish
     if (this.emitDebounceTimer) { clearTimeout(this.emitDebounceTimer); }
