@@ -103,8 +103,8 @@ interface ManagedSession {
   history: Array<{ seq: number; entry: OutputEntry }>;
   /** Pending permission requests awaiting phone response, keyed by toolUseId. */
   pendingPermissions: Map<string, { toolName: string; resolve: (result: PermissionResult) => void }>;
-  /** Pending AskUserQuestion options, keyed by toolUseId. Stores option labels for keypress→text mapping. */
-  pendingQuestions: Map<string, Array<{ label: string; description?: string }>>;
+  /** Answered AskUserQuestion toolUseIds — used to skip resolved questions when scanning history. */
+  answeredQuestions: Set<string>;
   /** Timestamp of last activity. */
   lastActivity: string;
   /** Title extracted from first user message. */
@@ -144,7 +144,7 @@ export class SdkSessionManager {
       permissionMode: initialPermissionMode,
       history: [],
       pendingPermissions: new Map(),
-      pendingQuestions: new Map(),
+      answeredQuestions: new Set(),
       lastActivity: new Date().toISOString(),
       title: null,
       alive: true,
@@ -213,13 +213,14 @@ export class SdkSessionManager {
 
     if (allow) {
       const result: PermissionResult = { behavior: 'allow', updatedInput: {} };
-      // "Always allow" → persist as a session-scoped allow rule for this tool
+      // "Always allow" → persist as a project-scoped allow rule so it survives across sessions.
+      // Uses projectSettings (not session) because "Always Allow" implies persistence.
       if (modifier === 'always') {
         const rule: PermissionUpdate = {
           type: 'addRules',
           rules: [{ toolName: pending.toolName }],
           behavior: 'allow',
-          destination: 'session',
+          destination: 'projectSettings',
         };
         result.updatedPermissions = [rule];
       }
@@ -245,15 +246,20 @@ export class SdkSessionManager {
     }
   }
 
-  /** Change the effort level for a session. */
-  async setEffortLevel(sessionId: string, effort: string): Promise<boolean> {
+  /**
+   * Change the effort level for a session.
+   * Returns { applied, confirmedLevel } so the caller always has a level to confirm back to the phone.
+   * - applied=true: SDK accepted the level
+   * - applied=false: level unsupported or failed, confirmedLevel is the fallback
+   */
+  async setEffortLevel(sessionId: string, effort: string): Promise<{ applied: boolean; confirmedLevel: string }> {
     const session = this.sessions.get(sessionId);
-    if (!session || !session.alive) { return false; }
+    if (!session || !session.alive) { return { applied: false, confirmedLevel: effort }; }
 
     // Map phone effort levels to SDK-compatible values.
-    // SDK applyFlagSettings only accepts 'low' | 'medium' | 'high'.
-    // Phone also sends 'max' and 'auto' which need mapping.
-    let sdkEffort: 'low' | 'medium' | 'high';
+    // SDK applyFlagSettings accepts 'low' | 'medium' | 'high', or undefined to reset to model default.
+    // Phone sends 'max' (→ high) and 'auto' (→ undefined/reset).
+    let sdkEffort: 'low' | 'medium' | 'high' | undefined;
     switch (effort) {
       case 'low':
       case 'medium':
@@ -264,19 +270,23 @@ export class SdkSessionManager {
         sdkEffort = 'high';
         this.events.log(`[SDK] Mapping effort 'max' → 'high' for ${sessionId}`);
         break;
+      case 'auto':
+        sdkEffort = undefined; // Reset to model default
+        this.events.log(`[SDK] Resetting effort to model default for ${sessionId}`);
+        break;
       default:
-        // 'auto' or unknown — skip, let SDK use its default
-        this.events.log(`[SDK] Unsupported effort level '${effort}' for ${sessionId} — ignoring`);
-        return false;
+        this.events.log(`[SDK] Unknown effort level '${effort}' for ${sessionId} — ignoring`);
+        return { applied: false, confirmedLevel: effort };
     }
 
     try {
       await session.query.applyFlagSettings({ effortLevel: sdkEffort });
       this.events.log(`[SDK] Effort level set to ${sdkEffort} for ${sessionId}`);
-      return true;
+      // Confirm with the original phone level (e.g. 'max') so phone UI stays consistent
+      return { applied: true, confirmedLevel: effort };
     } catch (err) {
       this.events.log(`[SDK] Failed to set effort level for ${sessionId}: ${err}`);
-      return false;
+      return { applied: false, confirmedLevel: effort };
     }
   }
 
@@ -372,7 +382,8 @@ export class SdkSessionManager {
 
   /**
    * Resolve a question option selection by keypress number (1-based).
-   * Looks up the stored question options and sends the option label as input.
+   * Scans session history for the most recent unanswered ask_question entry,
+   * extracts its options, and sends the selected option label as user input.
    * Returns true if the answer was sent.
    */
   resolveQuestionKeypress(sessionId: string, key: string): boolean {
@@ -382,14 +393,34 @@ export class SdkSessionManager {
     const keyNum = parseInt(key, 10);
     if (isNaN(keyNum) || keyNum < 1) return false;
 
-    // Find the first pending question that has options matching this key
-    for (const [toolUseId, options] of session.pendingQuestions) {
-      if (keyNum <= options.length) {
-        const selected = options[keyNum - 1];
-        session.pendingQuestions.delete(toolUseId);
-        // Send the option label as user input — the SDK routes it to the pending AskUserQuestion
-        return this.sendInput(sessionId, selected.label);
+    // Scan history backwards for the most recent unanswered ask_question
+    for (let i = session.history.length - 1; i >= 0; i--) {
+      const entry = session.history[i].entry;
+      if (entry.metadata?.special !== 'ask_question') continue;
+
+      const toolUseId = entry.metadata.tool_use_id as string | undefined;
+      if (!toolUseId || session.answeredQuestions.has(toolUseId)) continue;
+
+      const options = entry.metadata.options as Array<{ label: string }> | undefined;
+      if (!options || keyNum > options.length) continue;
+
+      const selected = options[keyNum - 1];
+      session.answeredQuestions.add(toolUseId);
+
+      // Prune answered set to prevent unbounded growth
+      if (session.answeredQuestions.size > 50) {
+        const first = session.answeredQuestions.values().next().value;
+        if (first !== undefined) session.answeredQuestions.delete(first);
       }
+
+      // Send option label with parent_tool_use_id so SDK routes to the correct AskUserQuestion
+      session.lastActivity = new Date().toISOString();
+      session.input.push({
+        type: 'user',
+        message: { role: 'user', content: selected.label },
+        parent_tool_use_id: toolUseId,
+      });
+      return true;
     }
 
     this.events.log(`[SDK] No pending question for keypress '${key}' in ${sessionId}`);
@@ -537,19 +568,12 @@ export class SdkSessionManager {
     toolInput: Record<string, unknown>,
     options: Parameters<CanUseTool>[2],
   ): Promise<PermissionResult> {
-    // AskUserQuestion: always allow — the answer comes via sendInput(), not permission response
+    // AskUserQuestion: always allow — the answer comes via sendInput(), not permission response.
+    // Question options are stored in session history as OutputEntry metadata (via sdkAdapter),
+    // so resolveQuestionKeypress() can look them up without duplicate state.
     if (toolName === 'AskUserQuestion') {
       const questions = (toolInput.questions as unknown[]) || [];
       this.events.onAskQuestion(sessionId, options.toolUseID, questions);
-
-      // Store options so we can map keypress numbers back to option labels
-      if (questions.length > 0) {
-        const firstQ = questions[0] as { options?: Array<{ label: string; description?: string }> };
-        if (firstQ.options && firstQ.options.length > 0) {
-          session.pendingQuestions.set(options.toolUseID, firstQ.options);
-        }
-      }
-
       return Promise.resolve({ behavior: 'allow', updatedInput: {} });
     }
 
