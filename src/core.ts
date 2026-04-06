@@ -129,7 +129,7 @@ export class BridgeCore {
         log(`[Codedeck] Question input for session ${sessionId}: ${text.slice(0, 50)}...`);
         // With the SDK, question answers go through the same input channel.
         // The SDK handles routing it to the pending AskUserQuestion tool.
-        const sent = this.sdk.sendInput(sessionId, text);
+        const sent = this.sdk.sendQuestionInput(sessionId, text);
         if (!sent) {
           this.relay.publishInputFailed(sessionId, 'no-terminal').catch(err => {
             console.error('[Codedeck] Failed to publish input-failed:', err);

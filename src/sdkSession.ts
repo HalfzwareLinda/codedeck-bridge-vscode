@@ -198,6 +198,46 @@ export class SdkSessionManager {
     return true;
   }
 
+  /**
+   * Send a free-text answer to a pending AskUserQuestion.
+   * Scans session history for the most recent unanswered ask_question,
+   * extracts its tool_use_id, and sends the text with parent_tool_use_id set.
+   * Falls back to regular sendInput if no pending question found.
+   */
+  sendQuestionInput(sessionId: string, text: string): boolean {
+    const session = this.sessions.get(sessionId);
+    if (!session || !session.alive) { return false; }
+
+    // Scan history backwards for the most recent unanswered ask_question
+    for (let i = session.history.length - 1; i >= 0; i--) {
+      const entry = session.history[i].entry;
+      if (entry.metadata?.special !== 'ask_question') continue;
+
+      const toolUseId = entry.metadata.tool_use_id as string | undefined;
+      if (!toolUseId || session.answeredQuestions.has(toolUseId)) continue;
+
+      // Found the pending question — mark as answered and send with parent_tool_use_id
+      session.answeredQuestions.add(toolUseId);
+
+      if (session.answeredQuestions.size > 50) {
+        const first = session.answeredQuestions.values().next().value;
+        if (first !== undefined) session.answeredQuestions.delete(first);
+      }
+
+      session.lastActivity = new Date().toISOString();
+      session.input.push({
+        type: 'user',
+        message: { role: 'user', content: text },
+        parent_tool_use_id: toolUseId,
+      });
+      return true;
+    }
+
+    // No pending question found — fall back to regular input
+    this.events.log(`[SDK] No pending question for question-input in ${sessionId} — falling back to sendInput`);
+    return this.sendInput(sessionId, text);
+  }
+
   /** Resolve a pending permission request from the phone. */
   resolvePermission(sessionId: string, toolUseId: string, allow: boolean, modifier?: 'always' | 'never'): void {
     const session = this.sessions.get(sessionId);
