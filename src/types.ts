@@ -80,10 +80,18 @@ export interface KeypressMessage {
 
 export type PermissionMode = 'default' | 'acceptEdits' | 'plan';
 
+export type EffortLevel = 'low' | 'medium' | 'high';
+
 export interface ModeChangeMessage {
   type: 'mode';
   sessionId: string;
   mode: PermissionMode;
+}
+
+export interface EffortChangeMessage {
+  type: 'effort';
+  sessionId: string;
+  effort: EffortLevel;
 }
 
 // --- History catch-up (phone → bridge → phone) ---
@@ -209,10 +217,16 @@ export interface ModeConfirmedMessage {
   mode: PermissionMode;
 }
 
+export interface EffortConfirmedMessage {
+  type: 'effort-confirmed';
+  sessionId: string;
+  effort: EffortLevel;
+}
+
 // --- Union ---
 
-export type BridgeOutbound = SessionListMessage | OutputMessage | HistoryResponseMessage | SessionPendingMessage | SessionReadyMessage | SessionFailedMessage | InputFailedMessage | CloseSessionAckMessage | SessionReplacedMessage | ModeConfirmedMessage;
-export type BridgeInbound = InputMessage | QuestionInputMessage | PermissionResponseMessage | KeypressMessage | ModeChangeMessage | HistoryRequestMessage | CreateSessionMessage | RefreshSessionsMessage | CloseSessionMessage | UploadImageMessage;
+export type BridgeOutbound = SessionListMessage | OutputMessage | HistoryResponseMessage | SessionPendingMessage | SessionReadyMessage | SessionFailedMessage | InputFailedMessage | CloseSessionAckMessage | SessionReplacedMessage | ModeConfirmedMessage | EffortConfirmedMessage;
+export type BridgeInbound = InputMessage | QuestionInputMessage | PermissionResponseMessage | KeypressMessage | ModeChangeMessage | EffortChangeMessage | HistoryRequestMessage | CreateSessionMessage | RefreshSessionsMessage | CloseSessionMessage | UploadImageMessage;
 export type BridgeMessage = BridgeOutbound | BridgeInbound;
 
 // --- Nostr event kinds ---

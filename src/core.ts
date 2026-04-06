@@ -218,6 +218,15 @@ export class BridgeCore {
           });
         }
       },
+      onEffortChange: async (sessionId, effort) => {
+        log(`[Codedeck] Effort change for session ${sessionId}: ${effort}`);
+        const success = await this.sdk.setEffortLevel(sessionId, effort);
+        if (success) {
+          this.relay.publishEffortConfirmed(sessionId, effort).catch(err => {
+            log(`[Codedeck] Failed to publish effort-confirmed: ${err}`);
+          });
+        }
+      },
       onHistoryRequest: async (sessionId, afterSeq, _phonePubkey) => {
         log(`[Codedeck] History request for ${sessionId} (afterSeq: ${afterSeq})`);
 

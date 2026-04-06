@@ -35,6 +35,7 @@ export interface NostrRelayEvents {
   onPermissionResponse: (sessionId: string, requestId: string, allow: boolean, modifier?: 'always' | 'never') => void;
   onKeypress: (sessionId: string, key: string, context?: 'plan-approval' | 'question') => void;
   onModeChange: (sessionId: string, mode: string) => void;
+  onEffortChange: (sessionId: string, effort: string) => void;
   onHistoryRequest: (sessionId: string, afterSeq: number | undefined, phonePubkey: string) => void;
   onCreateSession: () => void;
   onRefreshSessions: () => void;
@@ -678,6 +679,17 @@ export class NostrRelay {
     return this.publishToAllPhones(msg, 30);
   }
 
+  /** Publish effort-confirmed feedback after an effort level change (NIP-40: expires in 30s). */
+  async publishEffortConfirmed(sessionId: string, effort: string): Promise<boolean> {
+    const msg: import('./types').EffortConfirmedMessage = {
+      type: 'effort-confirmed',
+      sessionId,
+      effort: effort as import('./types').EffortLevel,
+    };
+    this.log(`[Codedeck] Publishing effort-confirmed: session=${sessionId}, effort=${effort}`);
+    return this.publishToAllPhones(msg, 30);
+  }
+
   private static readonly HISTORY_CHUNK_SIZE = 20;
   private static readonly MAX_CHUNK_JSON_BYTES = 48_000;
   private static readonly CHUNK_DELAY_MS = 500;
@@ -853,6 +865,10 @@ export class NostrRelay {
         case 'mode':
           Promise.resolve(this.events.onModeChange(msg.sessionId, msg.mode))
             .catch(err => console.error('[Codedeck] onModeChange handler error:', err));
+          break;
+        case 'effort':
+          Promise.resolve(this.events.onEffortChange(msg.sessionId, msg.effort))
+            .catch(err => console.error('[Codedeck] onEffortChange handler error:', err));
           break;
         case 'history-request':
           this.events.onHistoryRequest(msg.sessionId, msg.afterSeq, event.pubkey);

@@ -230,6 +230,21 @@ export class SdkSessionManager {
     }
   }
 
+  /** Change the effort level for a session. */
+  async setEffortLevel(sessionId: string, effort: string): Promise<boolean> {
+    const session = this.sessions.get(sessionId);
+    if (!session || !session.alive) { return false; }
+
+    try {
+      await session.query.applyFlagSettings({ effortLevel: effort as 'low' | 'medium' | 'high' });
+      this.events.log(`[SDK] Effort level set to ${effort} for ${sessionId}`);
+      return true;
+    } catch (err) {
+      this.events.log(`[SDK] Failed to set effort level for ${sessionId}: ${err}`);
+      return false;
+    }
+  }
+
   /** Close a session. */
   closeSession(sessionId: string): boolean {
     const session = this.sessions.get(sessionId);
