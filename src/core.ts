@@ -83,6 +83,11 @@ export class BridgeCore {
         // AskUserQuestion entries are already emitted by sdkAdapter in the
         // assistant message output stream — no extra action needed here.
       },
+      onAutoModeChange: (sessionId, mode) => {
+        this.relay.publishModeConfirmed(sessionId, mode).catch(err => {
+          log(`[Codedeck] Failed to publish auto mode-confirmed: ${err}`);
+        });
+      },
       onSessionListChanged: (sessions) => {
         this.relay.publishSessionList(sessions).catch(err => {
           console.error('[Codedeck] Failed to publish session list:', err);

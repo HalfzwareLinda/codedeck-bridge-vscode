@@ -88,6 +88,8 @@ export interface SdkSessionEvents {
   onAuthError: (sessionId: string, error: string) => void;
   /** Called when a session is successfully authenticated (init message received). */
   onAuthSuccess: (sessionId: string, info: { model: string; apiKeySource: string; version: string }) => void;
+  /** Called when the SDK autonomously changes permission mode (e.g., EnterPlanMode). */
+  onAutoModeChange?: (sessionId: string, mode: PermissionMode) => void;
   /** Log function. */
   log: (msg: string) => void;
 }
@@ -625,6 +627,17 @@ export class SdkSessionManager {
       const questions = (toolInput.questions as unknown[]) || [];
       this.events.onAskQuestion(sessionId, options.toolUseID, questions);
       return Promise.resolve({ behavior: 'allow', updatedInput: {} });
+    }
+
+    // EnterPlanMode: SDK is autonomously entering plan mode. Update our tracked
+    // mode so subsequent canUseTool calls (especially ExitPlanMode) are correctly
+    // forwarded to the phone instead of auto-approved.
+    if (toolName === 'EnterPlanMode') {
+      session.permissionMode = 'plan';
+      this.events.onSessionListChanged(this.getSessions());
+      this.events.onAutoModeChange?.(sessionId, 'plan');
+      this.events.log(`[SDK] EnterPlanMode: switched ${sessionId} to plan mode`);
+      return Promise.resolve({ behavior: 'allow' as const, updatedInput: {} });
     }
 
     // Default mode = YOLO: auto-approve everything (matches old bridge behavior
