@@ -1,0 +1,486 @@
+/**
+ * SDK Session Manager — replaces TerminalBridge + SessionWatcher.
+ *
+ * Each phone-created session spawns a Claude Code subprocess via the Agent SDK's
+ * query() function. Communication is structured JSON over stdin/stdout — no
+ * terminal emulation, no JSONL file watching, no keystroke simulation.
+ *
+ * Permissions are handled via the SDK's canUseTool callback, which blocks
+ * execution until the bridge responds (either auto-approve or phone response).
+ */
+
+import { query, getSessionMessages, listSessions } from '@anthropic-ai/claude-agent-sdk';
+import type {
+  Query,
+  SDKMessage,
+  SDKUserMessage,
+  SDKSystemMessage,
+  PermissionResult,
+  PermissionMode,
+  CanUseTool,
+  Options,
+} from '@anthropic-ai/claude-agent-sdk';
+import type { OutputEntry, RemoteSessionInfo } from './types';
+import { sdkMessageToEntries } from './sdkAdapter';
+
+// --- Async input generator ---
+
+/** Creates a controllable async generator that yields SDKUserMessage objects.
+ *  Call push() to queue a message, and the generator will yield it. */
+function createInputChannel(): {
+  generator: AsyncGenerator<SDKUserMessage, void>;
+  push: (msg: SDKUserMessage) => void;
+  close: () => void;
+} {
+  const queue: SDKUserMessage[] = [];
+  let resolve: (() => void) | null = null;
+  let closed = false;
+
+  const generator = (async function* () {
+    while (!closed) {
+      if (queue.length > 0) {
+        yield queue.shift()!;
+      } else {
+        await new Promise<void>(r => { resolve = r; });
+        resolve = null;
+      }
+    }
+  })();
+
+  return {
+    generator,
+    push(msg: SDKUserMessage) {
+      queue.push(msg);
+      resolve?.();
+    },
+    close() {
+      closed = true;
+      resolve?.();
+    },
+  };
+}
+
+// --- Permission request forwarding ---
+
+export interface PermissionRequest {
+  sessionId: string;
+  toolName: string;
+  toolUseId: string;
+  toolInput: Record<string, unknown>;
+  title?: string;
+  description?: string;
+  resolve: (result: PermissionResult) => void;
+}
+
+export interface SdkSessionEvents {
+  /** Called when new output entries are available for a session. */
+  onOutput: (sessionId: string, entries: Array<{ seq: number; entry: OutputEntry }>) => void;
+  /** Called when a permission request needs phone approval (not auto-approved). */
+  onPermissionRequest: (request: PermissionRequest) => void;
+  /** Called when an AskUserQuestion tool is invoked — forward to phone. */
+  onAskQuestion: (sessionId: string, toolUseId: string, questions: unknown[]) => void;
+  /** Called when the session list changes (session started, ended, etc.). */
+  onSessionListChanged: (sessions: RemoteSessionInfo[]) => void;
+  /** Called when a session subprocess exits. */
+  onSessionEnded: (sessionId: string) => void;
+  /** Called when authentication fails. */
+  onAuthError: (sessionId: string, error: string) => void;
+  /** Called when a session is successfully authenticated (init message received). */
+  onAuthSuccess: (sessionId: string, info: { model: string; apiKeySource: string; version: string }) => void;
+  /** Log function. */
+  log: (msg: string) => void;
+}
+
+interface ManagedSession {
+  query: Query;
+  input: ReturnType<typeof createInputChannel>;
+  abortController: AbortController;
+  seqCounter: number;
+  cwd: string;
+  permissionMode: PermissionMode;
+  /** Output entries history for catch-up. */
+  history: Array<{ seq: number; entry: OutputEntry }>;
+  /** Pending permission requests awaiting phone response, keyed by toolUseId. */
+  pendingPermissions: Map<string, (result: PermissionResult) => void>;
+  /** Timestamp of last activity. */
+  lastActivity: string;
+  /** Title extracted from first user message. */
+  title: string | null;
+  /** Whether the session is still running. */
+  alive: boolean;
+  /** Number of times this session has been auto-restarted after crash. */
+  restartCount: number;
+}
+
+export class SdkSessionManager {
+  private static readonly MAX_RESTARTS = 2;
+
+  private sessions = new Map<string, ManagedSession>();
+  private events: SdkSessionEvents;
+
+  constructor(events: SdkSessionEvents) {
+    this.events = events;
+  }
+
+  /** Create a new Claude Code session via the Agent SDK. */
+  createSession(sessionId: string, cwd: string, initialPermissionMode: PermissionMode = 'plan'): void {
+    if (this.sessions.has(sessionId)) {
+      this.events.log(`[SDK] Session ${sessionId} already exists`);
+      return;
+    }
+
+    const input = createInputChannel();
+    const abortController = new AbortController();
+
+    const session: ManagedSession = {
+      query: undefined as unknown as Query, // Set below
+      input,
+      abortController,
+      seqCounter: 0,
+      cwd,
+      permissionMode: initialPermissionMode,
+      history: [],
+      pendingPermissions: new Map(),
+      lastActivity: new Date().toISOString(),
+      title: null,
+      alive: true,
+      restartCount: 0,
+    };
+
+    const canUseTool: CanUseTool = async (toolName, toolInput, options) => {
+      return this.handlePermission(sessionId, session, toolName, toolInput, options);
+    };
+
+    const options: Options = {
+      sessionId,
+      cwd,
+      permissionMode: initialPermissionMode,
+      abortController,
+      canUseTool,
+      settingSources: ['user', 'project'],
+      systemPrompt: { type: 'preset', preset: 'claude_code' },
+      tools: { type: 'preset', preset: 'claude_code' },
+    };
+
+    const q = query({ prompt: input.generator, options });
+    session.query = q;
+    this.sessions.set(sessionId, session);
+
+    // Start consuming messages in background
+    this.consumeMessages(sessionId, session, q);
+    this.events.log(`[SDK] Session ${sessionId} created in ${cwd}`);
+  }
+
+  /** Send user text input to a session. Returns true if session exists. */
+  sendInput(sessionId: string, text: string): boolean {
+    const session = this.sessions.get(sessionId);
+    if (!session || !session.alive) { return false; }
+
+    session.lastActivity = new Date().toISOString();
+
+    // Extract title from first user message
+    if (!session.title) {
+      const cleaned = text.replace(/\n/g, ' ').trim();
+      if (cleaned && !cleaned.startsWith('[') && !cleaned.startsWith('Request interrupted')) {
+        session.title = cleaned.length > 80 ? cleaned.slice(0, 77) + '...' : cleaned;
+      }
+    }
+
+    session.input.push({
+      type: 'user',
+      message: { role: 'user', content: text },
+      parent_tool_use_id: null,
+    });
+    return true;
+  }
+
+  /** Resolve a pending permission request from the phone. */
+  resolvePermission(sessionId: string, toolUseId: string, allow: boolean, modifier?: 'always' | 'never'): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) { return; }
+
+    const resolve = session.pendingPermissions.get(toolUseId);
+    if (!resolve) {
+      this.events.log(`[SDK] No pending permission for ${toolUseId} in ${sessionId}`);
+      return;
+    }
+
+    session.pendingPermissions.delete(toolUseId);
+
+    if (allow) {
+      resolve({ behavior: 'allow' });
+    } else {
+      resolve({ behavior: 'deny', message: modifier === 'never' ? 'User denied (never ask again)' : 'User denied' });
+    }
+  }
+
+  /** Change the permission mode for a session. */
+  async setPermissionMode(sessionId: string, mode: PermissionMode): Promise<boolean> {
+    const session = this.sessions.get(sessionId);
+    if (!session || !session.alive) { return false; }
+
+    try {
+      await session.query.setPermissionMode(mode);
+      session.permissionMode = mode;
+      this.events.log(`[SDK] Permission mode set to ${mode} for ${sessionId}`);
+      return true;
+    } catch (err) {
+      this.events.log(`[SDK] Failed to set permission mode for ${sessionId}: ${err}`);
+      return false;
+    }
+  }
+
+  /** Close a session. */
+  closeSession(sessionId: string): boolean {
+    const session = this.sessions.get(sessionId);
+    if (!session) { return false; }
+
+    session.alive = false;
+    session.input.close();
+    session.abortController.abort();
+
+    // Reject any pending permissions
+    for (const [, resolve] of session.pendingPermissions) {
+      resolve({ behavior: 'deny', message: 'Session closed' });
+    }
+    session.pendingPermissions.clear();
+
+    this.sessions.delete(sessionId);
+    this.events.log(`[SDK] Session ${sessionId} closed`);
+    return true;
+  }
+
+  /** Get the current session list. */
+  getSessions(): RemoteSessionInfo[] {
+    const sessions: RemoteSessionInfo[] = [];
+    for (const [id, s] of this.sessions) {
+      if (!s.alive) continue;
+      sessions.push({
+        id,
+        slug: `session-${id.slice(0, 8)}`,
+        cwd: s.cwd,
+        lastActivity: s.lastActivity,
+        lineCount: s.seqCounter,
+        title: s.title,
+        project: s.cwd.split('/').pop() || s.cwd,
+        hasTerminal: true, // SDK sessions are always "alive"
+        permissionMode: s.permissionMode as 'default' | 'acceptEdits' | 'plan',
+      });
+    }
+    return sessions;
+  }
+
+  /** Get history entries for a session (in-memory). */
+  getHistory(sessionId: string, afterSeq?: number): Array<{ seq: number; entry: OutputEntry }> {
+    const session = this.sessions.get(sessionId);
+    if (!session) { return []; }
+    if (afterSeq === undefined || afterSeq === 0) {
+      return session.history.slice();
+    }
+    return session.history.filter(e => e.seq > afterSeq);
+  }
+
+  /**
+   * Get history from SDK's persistent JSONL storage.
+   * Falls back to this when in-memory history is empty (e.g. after extension reload).
+   */
+  async getPersistedHistory(sessionId: string, cwd?: string): Promise<Array<{ seq: number; entry: OutputEntry }>> {
+    try {
+      const messages = await getSessionMessages(sessionId, {
+        dir: cwd,
+        includeSystemMessages: true,
+      });
+
+      const entries: Array<{ seq: number; entry: OutputEntry }> = [];
+      let seq = 0;
+      for (const msg of messages) {
+        // Convert SessionMessage to OutputEntry via sdkAdapter
+        const sdkMsg = { ...msg, session_id: sessionId } as SDKMessage;
+        const converted = sdkMessageToEntries(sdkMsg);
+        for (const entry of converted) {
+          entries.push({ seq: ++seq, entry });
+        }
+      }
+      return entries;
+    } catch (err) {
+      this.events.log(`[SDK] Failed to load persisted history for ${sessionId}: ${err}`);
+      return [];
+    }
+  }
+
+  getHistoryCount(sessionId: string): number {
+    return this.sessions.get(sessionId)?.history.length ?? 0;
+  }
+
+  getPermissionMode(sessionId: string): PermissionMode | undefined {
+    return this.sessions.get(sessionId)?.permissionMode;
+  }
+
+  hasSession(sessionId: string): boolean {
+    return this.sessions.has(sessionId);
+  }
+
+  /** Dispose all sessions. */
+  dispose(): void {
+    for (const [id] of this.sessions) {
+      this.closeSession(id);
+    }
+  }
+
+  // --- Internal ---
+
+  /** Consume SDK messages and forward as OutputEntry to the Nostr relay. */
+  private async consumeMessages(sessionId: string, session: ManagedSession, q: Query): Promise<void> {
+    try {
+      for await (const msg of q) {
+        if (!session.alive) break;
+
+        // Auth error detection: SDK emits auth_status with error field on failure
+        if (msg.type === 'auth_status') {
+          const authMsg = msg as import('@anthropic-ai/claude-agent-sdk').SDKAuthStatusMessage;
+          if (authMsg.error) {
+            this.events.log(`[SDK] Auth error for ${sessionId}: ${authMsg.error}`);
+            this.events.onAuthError(sessionId, authMsg.error);
+          }
+          continue; // Don't forward auth_status to phone
+        }
+
+        // Auth success detection: init message means Claude Code is running
+        if (msg.type === 'system' && (msg as SDKSystemMessage).subtype === 'init') {
+          const sysMsg = msg as SDKSystemMessage;
+          session.permissionMode = sysMsg.permissionMode;
+          this.events.onAuthSuccess(sessionId, {
+            model: sysMsg.model,
+            apiKeySource: sysMsg.apiKeySource,
+            version: sysMsg.claude_code_version,
+          });
+          this.events.onSessionListChanged(this.getSessions());
+        }
+
+        const entries = sdkMessageToEntries(msg);
+        if (entries.length === 0) continue;
+
+        const seqEntries = entries.map(entry => ({
+          seq: ++session.seqCounter,
+          entry,
+        }));
+
+        // Store in history (cap at 500)
+        session.history.push(...seqEntries);
+        if (session.history.length > 500) {
+          session.history = session.history.slice(-500);
+        }
+
+        session.lastActivity = new Date().toISOString();
+        this.events.onOutput(sessionId, seqEntries);
+      }
+    } catch (err) {
+      if (!session.alive) return; // Intentional close, don't restart
+
+      this.events.log(`[SDK] Session ${sessionId} message stream error: ${err}`);
+
+      // Attempt auto-restart if under the retry limit
+      if (session.restartCount < SdkSessionManager.MAX_RESTARTS) {
+        session.restartCount++;
+        this.events.log(`[SDK] Restarting session ${sessionId} (attempt ${session.restartCount}/${SdkSessionManager.MAX_RESTARTS})`);
+
+        // Notify phone that we're restarting
+        const restartEntry: OutputEntry = {
+          entryType: 'system',
+          content: `Session interrupted — restarting (attempt ${session.restartCount})...`,
+          timestamp: new Date().toISOString(),
+          metadata: { special: 'session_restart' },
+        };
+        this.events.onOutput(sessionId, [{ seq: ++session.seqCounter, entry: restartEntry }]);
+
+        // Re-create input channel and query with resume
+        const newInput = createInputChannel();
+        const newAbort = new AbortController();
+        session.input = newInput;
+        session.abortController = newAbort;
+
+        const newQ = query({
+          prompt: newInput.generator,
+          options: {
+            resume: sessionId,
+            cwd: session.cwd,
+            permissionMode: session.permissionMode,
+            abortController: newAbort,
+            canUseTool: async (toolName, toolInput, options) => {
+              return this.handlePermission(sessionId, session, toolName, toolInput, options);
+            },
+            settingSources: ['user', 'project'],
+            systemPrompt: { type: 'preset', preset: 'claude_code' },
+            tools: { type: 'preset', preset: 'claude_code' },
+          },
+        });
+        session.query = newQ;
+
+        // Resume consuming messages
+        this.consumeMessages(sessionId, session, newQ);
+        return; // Don't fall through to cleanup
+      }
+
+      // Max restarts exceeded — give up
+      this.events.log(`[SDK] Session ${sessionId} failed after ${session.restartCount} restarts`);
+      const errorEntry: OutputEntry = {
+        entryType: 'error',
+        content: 'Session ended unexpectedly after multiple restart attempts.',
+        timestamp: new Date().toISOString(),
+        metadata: { special: 'session_died' },
+      };
+      this.events.onOutput(sessionId, [{ seq: ++session.seqCounter, entry: errorEntry }]);
+    } finally {
+      // Only clean up if we're not restarting (session still in map = restart happened)
+      if (this.sessions.has(sessionId) && !session.alive) {
+        this.sessions.delete(sessionId);
+        this.events.onSessionEnded(sessionId);
+        this.events.onSessionListChanged(this.getSessions());
+        this.events.log(`[SDK] Session ${sessionId} ended`);
+      } else if (!this.sessions.has(sessionId)) {
+        // Session was already removed (e.g. closeSession called during restart)
+        this.events.onSessionEnded(sessionId);
+        this.events.onSessionListChanged(this.getSessions());
+        this.events.log(`[SDK] Session ${sessionId} ended`);
+      }
+    }
+  }
+
+  /**
+   * Handle a permission request from the SDK.
+   *
+   * The SDK only calls canUseTool for tools that actually need approval given
+   * the current permissionMode. We don't re-implement permission logic here —
+   * just forward to the phone for manual approval, or auto-allow AskUserQuestion
+   * (which is answered via the input channel, not via permission response).
+   */
+  private handlePermission(
+    sessionId: string,
+    session: ManagedSession,
+    toolName: string,
+    toolInput: Record<string, unknown>,
+    options: Parameters<CanUseTool>[2],
+  ): Promise<PermissionResult> {
+    // AskUserQuestion: always allow — the answer comes via sendInput(), not permission response
+    if (toolName === 'AskUserQuestion') {
+      const questions = (toolInput.questions as unknown[]) || [];
+      this.events.onAskQuestion(sessionId, options.toolUseID, questions);
+      return Promise.resolve({ behavior: 'allow' });
+    }
+
+    // Everything else: forward to phone for manual approval
+    return new Promise<PermissionResult>((resolve) => {
+      session.pendingPermissions.set(options.toolUseID, resolve);
+
+      this.events.onPermissionRequest({
+        sessionId,
+        toolName,
+        toolUseId: options.toolUseID,
+        toolInput,
+        title: options.title,
+        description: options.description,
+        resolve,
+      });
+    });
+  }
+}
