@@ -43,9 +43,12 @@ function parseAssistant(msg: SDKAssistantMessage): OutputEntry[] {
 
   for (const block of msg.message.content) {
     if (block.type === 'text') {
+      // Strip session-meta tags (injected by bridge for title extraction)
+      const content = block.text.replace(/<!--\s*session-meta:\s*\{[^}]+\}\s*-->/g, '').trim();
+      if (!content) continue; // Skip if tag was the entire content
       entries.push({
         entryType: 'text',
-        content: block.text,
+        content,
         timestamp: ts,
         metadata: { role: 'assistant', model },
       });

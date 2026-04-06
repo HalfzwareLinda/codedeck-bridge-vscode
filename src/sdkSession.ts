@@ -111,6 +111,10 @@ interface ManagedSession {
   lastActivity: string;
   /** Title extracted from first user message. */
   title: string | null;
+  /** Whether session-meta tag has been parsed. */
+  summarized: boolean;
+  /** Project name extracted from session-meta tag (overrides cwd-derived name). */
+  projectOverride?: string;
   /** Whether the session is still running. */
   alive: boolean;
   /** Number of times this session has been auto-restarted after crash. */
@@ -119,6 +123,7 @@ interface ManagedSession {
 
 export class SdkSessionManager {
   private static readonly MAX_RESTARTS = 2;
+  private static readonly PERMISSION_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
   private sessions = new Map<string, ManagedSession>();
   private events: SdkSessionEvents;
@@ -149,6 +154,7 @@ export class SdkSessionManager {
       answeredQuestions: new Set(),
       lastActivity: new Date().toISOString(),
       title: null,
+      summarized: false,
       alive: true,
       restartCount: 0,
     };
@@ -184,11 +190,13 @@ export class SdkSessionManager {
 
     session.lastActivity = new Date().toISOString();
 
-    // Extract title from first user message
+    // Extract title from first user message and ask Claude for structured metadata
     if (!session.title) {
       const cleaned = text.replace(/\n/g, ' ').trim();
       if (cleaned && !cleaned.startsWith('[') && !cleaned.startsWith('Request interrupted')) {
         session.title = cleaned.length > 80 ? cleaned.slice(0, 77) + '...' : cleaned;
+        // Ask Claude to emit a metadata tag in its first response
+        text += '\n\n<!-- emit-session-meta: In your response, include exactly one HTML comment: <!-- session-meta: {"topic": "<2-4 word task summary>", "project": "<project name>"} --> -->';
       }
     }
 
@@ -393,7 +401,7 @@ export class SdkSessionManager {
         lastActivity: s.lastActivity,
         lineCount: s.seqCounter,
         title: s.title,
-        project: s.cwd.split('/').pop() || s.cwd,
+        project: s.projectOverride || s.cwd.split('/').pop() || s.cwd,
         hasTerminal: true, // SDK sessions are always "alive"
         permissionMode: s.permissionMode as 'default' | 'acceptEdits' | 'plan',
       });
@@ -538,6 +546,28 @@ export class SdkSessionManager {
         const entries = sdkMessageToEntries(msg);
         if (entries.length === 0) continue;
 
+        // Parse session-meta tag from first assistant response
+        if (!session.summarized) {
+          for (const entry of entries) {
+            if (entry.entryType === 'text' && entry.metadata?.role === 'assistant') {
+              const match = entry.content.match(/<!--\s*session-meta:\s*(\{[^}]+\})\s*-->/);
+              if (match) {
+                try {
+                  const meta = JSON.parse(match[1]);
+                  if (meta.topic) session.title = String(meta.topic).slice(0, 40);
+                  if (meta.project) session.projectOverride = String(meta.project).slice(0, 40);
+                  session.summarized = true;
+                  this.events.log(`[SDK] Session meta: topic="${session.title}", project="${session.projectOverride}"`);
+                  // Strip the tag from the entry content
+                  entry.content = entry.content.replace(/<!--\s*session-meta:\s*\{[^}]+\}\s*-->/g, '').trim();
+                  // Trigger session list update so phone sees new metadata
+                  this.events.onSessionListChanged(this.getSessions());
+                } catch { /* ignore parse errors */ }
+              }
+            }
+          }
+        }
+
         const seqEntries = entries.map(entry => ({
           seq: ++session.seqCounter,
           entry,
@@ -600,6 +630,7 @@ export class SdkSessionManager {
       }
 
       // Max restarts exceeded — give up
+      session.alive = false;
       this.events.log(`[SDK] Session ${sessionId} failed after ${session.restartCount} restarts`);
       const errorEntry: OutputEntry = {
         entryType: 'error',
@@ -668,7 +699,18 @@ export class SdkSessionManager {
 
     // Plan / acceptEdits: forward to phone for manual approval
     return new Promise<PermissionResult>((resolve) => {
-      session.pendingPermissions.set(options.toolUseID, { toolName, resolve });
+      const timer = setTimeout(() => {
+        session.pendingPermissions.delete(options.toolUseID);
+        this.events.log(`[SDK] Permission timed out for ${toolName} (${options.toolUseID}) in session ${sessionId}`);
+        resolve({ behavior: 'deny', message: 'Permission timed out' });
+      }, SdkSessionManager.PERMISSION_TIMEOUT_MS);
+
+      const wrappedResolve = (result: PermissionResult) => {
+        clearTimeout(timer);
+        resolve(result);
+      };
+
+      session.pendingPermissions.set(options.toolUseID, { toolName, resolve: wrappedResolve });
 
       this.events.onPermissionRequest({
         sessionId,
@@ -677,7 +719,7 @@ export class SdkSessionManager {
         toolInput,
         title: options.title,
         description: options.description,
-        resolve,
+        resolve: wrappedResolve,
       });
     });
   }
