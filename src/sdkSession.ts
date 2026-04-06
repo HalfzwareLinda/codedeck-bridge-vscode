@@ -238,6 +238,16 @@ export class SdkSessionManager {
     return this.sendInput(sessionId, text);
   }
 
+  /** Find a pending permission by tool name. Returns the toolUseId if found. */
+  findPendingPermission(sessionId: string, toolName: string): string | undefined {
+    const session = this.sessions.get(sessionId);
+    if (!session) return undefined;
+    for (const [toolUseId, pending] of session.pendingPermissions) {
+      if (pending.toolName === toolName) return toolUseId;
+    }
+    return undefined;
+  }
+
   /** Resolve a pending permission request from the phone. */
   resolvePermission(sessionId: string, toolUseId: string, allow: boolean, modifier?: 'always' | 'never'): void {
     const session = this.sessions.get(sessionId);

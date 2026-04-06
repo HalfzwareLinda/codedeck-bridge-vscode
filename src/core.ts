@@ -190,24 +190,35 @@ export class BridgeCore {
         // then set the appropriate mode for subsequent tools.
         if (context === 'plan-approval') {
           switch (key) {
-            case '1':
+            case '1': {
               // Approve plan + auto-accept edits
-              // ExitPlanMode is auto-allowed (AskUserQuestion-like), so just set mode
+              const tid1 = this.sdk.findPendingPermission(sessionId, 'ExitPlanMode');
+              if (tid1) this.sdk.resolvePermission(sessionId, tid1, true);
               await this.sdk.setPermissionMode(sessionId, 'acceptEdits');
               this.relay.publishModeConfirmed(sessionId, 'acceptEdits').catch(err => {
                 log(`[Codedeck] Failed to publish mode-confirmed: ${err}`);
               });
               break;
-            case '2':
+            }
+            case '2': {
               // Approve plan + manual edits
+              const tid2 = this.sdk.findPendingPermission(sessionId, 'ExitPlanMode');
+              if (tid2) this.sdk.resolvePermission(sessionId, tid2, true);
               await this.sdk.setPermissionMode(sessionId, 'default');
               this.relay.publishModeConfirmed(sessionId, 'default').catch(err => {
                 log(`[Codedeck] Failed to publish mode-confirmed: ${err}`);
               });
               break;
-            case '3':
-              // Revise plan — next input will be a revision (handled normally via sendInput)
+            }
+            case '3': {
+              // Revise plan — deny ExitPlanMode so Claude stays in plan mode.
+              // The user's revision text will arrive as the next input message.
+              const toolUseId = this.sdk.findPendingPermission(sessionId, 'ExitPlanMode');
+              if (toolUseId) {
+                this.sdk.resolvePermission(sessionId, toolUseId, false);
+              }
               break;
+            }
           }
         }
         // Question option selection: map keypress number → option label → sendInput
