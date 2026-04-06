@@ -19,10 +19,17 @@ export interface RemoteSessionInfo {
   permissionMode?: PermissionMode;
 }
 
+export interface AuthStatus {
+  hasAnthropicKey: boolean;
+  hasGithubPat: boolean;
+  hasEnvKey: boolean;
+}
+
 export interface SessionListMessage {
   type: 'sessions';
   machine: string;
   sessions: RemoteSessionInfo[];
+  authStatus?: AuthStatus;
 }
 
 // --- Output Relay (bridge → phone) ---
@@ -223,10 +230,33 @@ export interface EffortConfirmedMessage {
   level: EffortLevel;
 }
 
+export interface InterruptMessage {
+  type: 'interrupt';
+  sessionId: string;
+}
+
+// --- Credentials (phone → bridge) ---
+
+export interface SetCredentialsMessage {
+  type: 'set-credentials';
+  anthropicApiKey?: string | null;
+  githubPat?: string | null;
+}
+
+export interface CredentialsAckMessage {
+  type: 'credentials-ack';
+  machine: string;
+  success: boolean;
+  hasAnthropicKey: boolean;
+  hasGithubPat: boolean;
+  keyValid?: boolean;
+  error?: string;
+}
+
 // --- Union ---
 
-export type BridgeOutbound = SessionListMessage | OutputMessage | HistoryResponseMessage | SessionPendingMessage | SessionReadyMessage | SessionFailedMessage | InputFailedMessage | CloseSessionAckMessage | SessionReplacedMessage | ModeConfirmedMessage | EffortConfirmedMessage;
-export type BridgeInbound = InputMessage | QuestionInputMessage | PermissionResponseMessage | KeypressMessage | ModeChangeMessage | EffortChangeMessage | HistoryRequestMessage | CreateSessionMessage | RefreshSessionsMessage | CloseSessionMessage | UploadImageMessage;
+export type BridgeOutbound = SessionListMessage | OutputMessage | HistoryResponseMessage | SessionPendingMessage | SessionReadyMessage | SessionFailedMessage | InputFailedMessage | CloseSessionAckMessage | SessionReplacedMessage | ModeConfirmedMessage | EffortConfirmedMessage | CredentialsAckMessage;
+export type BridgeInbound = InputMessage | QuestionInputMessage | PermissionResponseMessage | KeypressMessage | ModeChangeMessage | EffortChangeMessage | HistoryRequestMessage | CreateSessionMessage | RefreshSessionsMessage | CloseSessionMessage | UploadImageMessage | InterruptMessage | SetCredentialsMessage;
 export type BridgeMessage = BridgeOutbound | BridgeInbound;
 
 // --- Nostr event kinds ---
