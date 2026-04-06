@@ -282,6 +282,17 @@ export function activate(context: vscode.ExtensionContext): void {
   }, 30_000);
   context.subscriptions.push({ dispose: () => clearInterval(timestampInterval) });
 
+  // --- Heartbeat: re-publish session list every 60s so phones detect staleness ---
+  const heartbeatInterval = setInterval(() => {
+    if (bridgeCore?.relay.isConnected()) {
+      const sessions = bridgeCore?.sdk.getSessions() ?? [];
+      bridgeCore.relay.publishSessionList(sessions).catch(err => {
+        console.error('[Codedeck] Heartbeat publish failed:', err);
+      });
+    }
+  }, 60_000);
+  context.subscriptions.push({ dispose: () => clearInterval(heartbeatInterval) });
+
   console.log(`[Codedeck] Extension activated. Machine: ${machineName}, Relays: ${relays.join(', ')}, Phones: ${pairedPhones.length}`);
 }
 
@@ -291,6 +302,15 @@ export async function deactivate(): Promise<void> {
   if (ts && ts > 0 && extensionContext) {
     await extensionContext.globalState.update('codedeck_lastSeenTimestamp', ts);
   }
+  // Signal phones that bridge is going offline
+  if (bridgeCore?.relay.isConnected()) {
+    try {
+      await bridgeCore.relay.publishSessionList([]);
+    } catch {
+      // Best-effort on shutdown
+    }
+  }
+
   bridgeCore?.dispose();
   statusBar?.dispose();
   extensionContext = undefined;
