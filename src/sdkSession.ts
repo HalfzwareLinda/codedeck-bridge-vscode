@@ -468,7 +468,14 @@ export class SdkSessionManager {
       return Promise.resolve({ behavior: 'allow' });
     }
 
-    // Everything else: forward to phone for manual approval
+    // Default mode = YOLO: auto-approve everything (matches old bridge behavior
+    // where the bridge simulated pressing '1' for every permission prompt)
+    const mode = session.permissionMode;
+    if (mode === 'default') {
+      return Promise.resolve({ behavior: 'allow' });
+    }
+
+    // Plan / acceptEdits: forward to phone for manual approval
     return new Promise<PermissionResult>((resolve) => {
       session.pendingPermissions.set(options.toolUseID, resolve);
 
