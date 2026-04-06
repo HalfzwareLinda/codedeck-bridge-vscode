@@ -70,12 +70,12 @@
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^3.0.0",
     "esbuild": "^0.24.2",
+    "nostr-tools": "^2.23.1",
+    "qrcode-svg": "^1.1.0",
     "typescript": "^5.5.0",
     "vitest": "^4.0.18"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.2.92",
-    "nostr-tools": "^2.23.1",
-    "qrcode-svg": "^1.1.0"
+    "@anthropic-ai/claude-agent-sdk": "^0.2.92"
   }
 }

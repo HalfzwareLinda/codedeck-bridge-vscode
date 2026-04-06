@@ -4,7 +4,7 @@ src/**
 tsconfig.json
 **/*.ts
 !out/**
-node_modules/**
+# node_modules are managed by vsce: production dependencies are included automatically
 CLAUDE.md
 TODO.md
 *.vsix
