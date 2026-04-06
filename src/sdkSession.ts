@@ -200,6 +200,25 @@ export class SdkSessionManager {
     return true;
   }
 
+  /** Interrupt the current turn of a session (equivalent to Ctrl+C). */
+  interruptSession(sessionId: string): boolean {
+    const session = this.sessions.get(sessionId);
+    if (!session || !session.alive) { return false; }
+
+    this.events.log(`[SDK] Interrupting session ${sessionId}`);
+    session.query.interrupt().catch(err => {
+      this.events.log(`[SDK] Interrupt failed for ${sessionId}: ${err}`);
+    });
+
+    // Deny all pending permissions so the SDK isn't blocked
+    for (const [toolUseId, pending] of session.pendingPermissions) {
+      pending.resolve({ behavior: 'deny', message: 'Interrupted by user' });
+    }
+    session.pendingPermissions.clear();
+
+    return true;
+  }
+
   /**
    * Send a free-text answer to a pending AskUserQuestion.
    * Scans session history for the most recent unanswered ask_question,

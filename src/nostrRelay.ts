@@ -40,6 +40,7 @@ export interface NostrRelayEvents {
   onCreateSession: (defaultEffort?: string) => void;
   onRefreshSessions: () => void;
   onCloseSession: (sessionId: string) => void;
+  onInterrupt: (sessionId: string) => void;
   onUploadImage: (msg: import('./types').UploadImageMessage, phonePubkey: string) => void;
 }
 
@@ -884,6 +885,10 @@ export class NostrRelay {
         case 'close-session':
           Promise.resolve(this.events.onCloseSession(msg.sessionId))
             .catch(err => this.log(`[Codedeck] onCloseSession handler error: ${err}`));
+          break;
+        case 'interrupt':
+          Promise.resolve(this.events.onInterrupt(msg.sessionId))
+            .catch(err => this.log(`[Codedeck] onInterrupt handler error: ${err}`));
           break;
         case 'upload-image':
           this.events.onUploadImage(msg, event.pubkey);

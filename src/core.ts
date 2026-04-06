@@ -288,6 +288,10 @@ export class BridgeCore {
           console.error('[Codedeck] Failed to publish session list:', err);
         });
       },
+      onInterrupt: (sessionId) => {
+        log(`[Codedeck] Interrupt request for session ${sessionId}`);
+        this.sdk.interruptSession(sessionId);
+      },
       onCloseSession: async (sessionId) => {
         log(`[Codedeck] Close session request for ${sessionId}`);
         const found = this.sdk.closeSession(sessionId);
