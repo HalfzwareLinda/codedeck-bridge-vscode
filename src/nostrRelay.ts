@@ -680,13 +680,13 @@ export class NostrRelay {
   }
 
   /** Publish effort-confirmed feedback after an effort level change (NIP-40: expires in 30s). */
-  async publishEffortConfirmed(sessionId: string, effort: string): Promise<boolean> {
+  async publishEffortConfirmed(sessionId: string, level: string): Promise<boolean> {
     const msg: import('./types').EffortConfirmedMessage = {
       type: 'effort-confirmed',
       sessionId,
-      effort: effort as import('./types').EffortLevel,
+      level: level as import('./types').EffortLevel,
     };
-    this.log(`[Codedeck] Publishing effort-confirmed: session=${sessionId}, effort=${effort}`);
+    this.log(`[Codedeck] Publishing effort-confirmed: session=${sessionId}, effort=${level}`);
     return this.publishToAllPhones(msg, 30);
   }
 
@@ -867,7 +867,7 @@ export class NostrRelay {
             .catch(err => console.error('[Codedeck] onModeChange handler error:', err));
           break;
         case 'effort':
-          Promise.resolve(this.events.onEffortChange(msg.sessionId, msg.effort))
+          Promise.resolve(this.events.onEffortChange(msg.sessionId, msg.level))
             .catch(err => console.error('[Codedeck] onEffortChange handler error:', err));
           break;
         case 'history-request':

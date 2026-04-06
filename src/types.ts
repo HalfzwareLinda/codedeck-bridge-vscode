@@ -80,7 +80,7 @@ export interface KeypressMessage {
 
 export type PermissionMode = 'default' | 'acceptEdits' | 'plan';
 
-export type EffortLevel = 'low' | 'medium' | 'high';
+export type EffortLevel = 'low' | 'medium' | 'high' | 'max' | 'auto';
 
 export interface ModeChangeMessage {
   type: 'mode';
@@ -91,7 +91,7 @@ export interface ModeChangeMessage {
 export interface EffortChangeMessage {
   type: 'effort';
   sessionId: string;
-  effort: EffortLevel;
+  level: EffortLevel;
 }
 
 // --- History catch-up (phone → bridge → phone) ---
@@ -220,7 +220,7 @@ export interface ModeConfirmedMessage {
 export interface EffortConfirmedMessage {
   type: 'effort-confirmed';
   sessionId: string;
-  effort: EffortLevel;
+  level: EffortLevel;
 }
 
 // --- Union ---
