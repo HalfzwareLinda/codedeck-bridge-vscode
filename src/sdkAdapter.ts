@@ -66,7 +66,7 @@ function parseAssistant(msg: SDKAssistantMessage): OutputEntry[] {
           entryType: 'system',
           content: 'Plan approval needed',
           timestamp: ts,
-          metadata: { special: 'plan_approval', tool_use_id: block.id },
+          metadata: { special: 'plan_approval', tool_use_id: block.id, has_plan: !!plan },
         });
       } else if (block.name === 'AskUserQuestion') {
         const input = block.input as Record<string, unknown>;

@@ -97,6 +97,41 @@ describe('sdkMessageToEntries', () => {
 
       const planApproval = entries.find(e => e.metadata?.special === 'plan_approval');
       expect(planApproval).toBeDefined();
+      expect(planApproval!.metadata?.has_plan).toBe(true);
+    });
+
+    it('sets has_plan=false for plan-less ExitPlanMode', () => {
+      const msg: SDKAssistantMessage = {
+        type: 'assistant',
+        message: {
+          id: 'msg_01',
+          type: 'message',
+          role: 'assistant',
+          model: 'claude-opus-4-6',
+          content: [{
+            type: 'tool_use',
+            id: 'tool_plan',
+            name: 'ExitPlanMode',
+            input: { plan: '' },
+          }],
+          stop_reason: 'tool_use',
+          stop_sequence: null,
+          usage: { input_tokens: 100, output_tokens: 50, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        } as any,
+        parent_tool_use_id: null,
+        uuid: MSG_UUID,
+        session_id: SESSION_ID,
+      };
+
+      const entries = sdkMessageToEntries(msg);
+
+      // No plan text entry should be emitted
+      const planText = entries.find(e => e.metadata?.special === 'plan');
+      expect(planText).toBeUndefined();
+
+      const planApproval = entries.find(e => e.metadata?.special === 'plan_approval');
+      expect(planApproval).toBeDefined();
+      expect(planApproval!.metadata?.has_plan).toBe(false);
     });
 
     it('converts AskUserQuestion to question entries', () => {

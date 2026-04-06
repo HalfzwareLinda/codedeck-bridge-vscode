@@ -136,9 +136,9 @@ export class BridgeCore {
           });
         }
       },
-      onCreateSession: async () => {
+      onCreateSession: async (defaultEffort?) => {
         const sessionId = crypto.randomUUID();
-        log(`[Codedeck] Create session request — spawning SDK session ${sessionId}`);
+        log(`[Codedeck] Create session request — spawning SDK session ${sessionId}${defaultEffort ? ` (effort: ${defaultEffort})` : ''}`);
 
         try {
           const cwd = this.workspaceCwd || process.cwd();
@@ -162,6 +162,11 @@ export class BridgeCore {
             project,
             permissionMode: 'plan',
           };
+
+          // Apply default effort if requested
+          if (defaultEffort) {
+            await this.sdk.setEffortLevel(sessionId, defaultEffort);
+          }
 
           // Publish session-ready
           log(`[Codedeck] Publishing session-ready for ${sessionId}`);
@@ -205,8 +210,24 @@ export class BridgeCore {
               break;
           }
         }
-        // Non-plan keypresses (e.g. question selection) are ignored — they're
-        // handled via the question-input flow or permission-res flow instead.
+        // Question option selection: map keypress number → option label → sendInput
+        if (context === 'question') {
+          const sent = this.sdk.resolveQuestionKeypress(sessionId, key);
+          if (!sent) {
+            log(`[Codedeck] No pending question for keypress '${key}' in ${sessionId}`);
+          }
+        }
+
+        // Exit plan mode (plan-less ExitPlanMode): key '1' = yes, exit plan mode
+        if (context === 'exit-plan') {
+          if (key === '1') {
+            await this.sdk.setPermissionMode(sessionId, 'default');
+            this.relay.publishModeConfirmed(sessionId, 'default').catch(err => {
+              log(`[Codedeck] Failed to publish mode-confirmed: ${err}`);
+            });
+          }
+          // key '2' = No, stay in plan mode — no action needed
+        }
       },
       onModeChange: async (sessionId, mode) => {
         log(`[Codedeck] Mode change for session ${sessionId}: ${mode}`);

@@ -33,11 +33,11 @@ export interface NostrRelayEvents {
   onInput: (sessionId: string, text: string, phonePubkey: string) => void;
   onQuestionInput: (sessionId: string, text: string, optionCount: number, phonePubkey: string) => void;
   onPermissionResponse: (sessionId: string, requestId: string, allow: boolean, modifier?: 'always' | 'never') => void;
-  onKeypress: (sessionId: string, key: string, context?: 'plan-approval' | 'question') => void;
+  onKeypress: (sessionId: string, key: string, context?: 'plan-approval' | 'exit-plan' | 'question') => void;
   onModeChange: (sessionId: string, mode: string) => void;
   onEffortChange: (sessionId: string, effort: string) => void;
   onHistoryRequest: (sessionId: string, afterSeq: number | undefined, phonePubkey: string) => void;
-  onCreateSession: () => void;
+  onCreateSession: (defaultEffort?: string) => void;
   onRefreshSessions: () => void;
   onCloseSession: (sessionId: string) => void;
   onUploadImage: (msg: import('./types').UploadImageMessage, phonePubkey: string) => void;
@@ -874,7 +874,7 @@ export class NostrRelay {
           this.events.onHistoryRequest(msg.sessionId, msg.afterSeq, event.pubkey);
           break;
         case 'create-session':
-          Promise.resolve(this.events.onCreateSession())
+          Promise.resolve(this.events.onCreateSession((msg as { defaultEffort?: string }).defaultEffort))
             .catch(err => this.log(`[Codedeck] onCreateSession handler error: ${err}`));
           break;
         case 'refresh-sessions':

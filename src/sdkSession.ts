@@ -9,13 +9,14 @@
  * execution until the bridge responds (either auto-approve or phone response).
  */
 
-import { query, getSessionMessages, listSessions } from '@anthropic-ai/claude-agent-sdk';
+import { query, getSessionMessages } from '@anthropic-ai/claude-agent-sdk';
 import type {
   Query,
   SDKMessage,
   SDKUserMessage,
   SDKSystemMessage,
   PermissionResult,
+  PermissionUpdate,
   PermissionMode,
   CanUseTool,
   Options,
@@ -101,7 +102,9 @@ interface ManagedSession {
   /** Output entries history for catch-up. */
   history: Array<{ seq: number; entry: OutputEntry }>;
   /** Pending permission requests awaiting phone response, keyed by toolUseId. */
-  pendingPermissions: Map<string, (result: PermissionResult) => void>;
+  pendingPermissions: Map<string, { toolName: string; resolve: (result: PermissionResult) => void }>;
+  /** Pending AskUserQuestion options, keyed by toolUseId. Stores option labels for keypress→text mapping. */
+  pendingQuestions: Map<string, Array<{ label: string; description?: string }>>;
   /** Timestamp of last activity. */
   lastActivity: string;
   /** Title extracted from first user message. */
@@ -141,6 +144,7 @@ export class SdkSessionManager {
       permissionMode: initialPermissionMode,
       history: [],
       pendingPermissions: new Map(),
+      pendingQuestions: new Map(),
       lastActivity: new Date().toISOString(),
       title: null,
       alive: true,
@@ -199,8 +203,8 @@ export class SdkSessionManager {
     const session = this.sessions.get(sessionId);
     if (!session) { return; }
 
-    const resolve = session.pendingPermissions.get(toolUseId);
-    if (!resolve) {
+    const pending = session.pendingPermissions.get(toolUseId);
+    if (!pending) {
       this.events.log(`[SDK] No pending permission for ${toolUseId} in ${sessionId}`);
       return;
     }
@@ -208,9 +212,20 @@ export class SdkSessionManager {
     session.pendingPermissions.delete(toolUseId);
 
     if (allow) {
-      resolve({ behavior: 'allow' });
+      const result: PermissionResult = { behavior: 'allow', updatedInput: {} };
+      // "Always allow" → persist as a session-scoped allow rule for this tool
+      if (modifier === 'always') {
+        const rule: PermissionUpdate = {
+          type: 'addRules',
+          rules: [{ toolName: pending.toolName }],
+          behavior: 'allow',
+          destination: 'session',
+        };
+        result.updatedPermissions = [rule];
+      }
+      pending.resolve(result);
     } else {
-      resolve({ behavior: 'deny', message: modifier === 'never' ? 'User denied (never ask again)' : 'User denied' });
+      pending.resolve({ behavior: 'deny', message: modifier === 'never' ? 'User denied (never ask again)' : 'User denied' });
     }
   }
 
@@ -235,9 +250,29 @@ export class SdkSessionManager {
     const session = this.sessions.get(sessionId);
     if (!session || !session.alive) { return false; }
 
+    // Map phone effort levels to SDK-compatible values.
+    // SDK applyFlagSettings only accepts 'low' | 'medium' | 'high'.
+    // Phone also sends 'max' and 'auto' which need mapping.
+    let sdkEffort: 'low' | 'medium' | 'high';
+    switch (effort) {
+      case 'low':
+      case 'medium':
+      case 'high':
+        sdkEffort = effort;
+        break;
+      case 'max':
+        sdkEffort = 'high';
+        this.events.log(`[SDK] Mapping effort 'max' → 'high' for ${sessionId}`);
+        break;
+      default:
+        // 'auto' or unknown — skip, let SDK use its default
+        this.events.log(`[SDK] Unsupported effort level '${effort}' for ${sessionId} — ignoring`);
+        return false;
+    }
+
     try {
-      await session.query.applyFlagSettings({ effortLevel: effort as 'low' | 'medium' | 'high' });
-      this.events.log(`[SDK] Effort level set to ${effort} for ${sessionId}`);
+      await session.query.applyFlagSettings({ effortLevel: sdkEffort });
+      this.events.log(`[SDK] Effort level set to ${sdkEffort} for ${sessionId}`);
       return true;
     } catch (err) {
       this.events.log(`[SDK] Failed to set effort level for ${sessionId}: ${err}`);
@@ -255,8 +290,8 @@ export class SdkSessionManager {
     session.abortController.abort();
 
     // Reject any pending permissions
-    for (const [, resolve] of session.pendingPermissions) {
-      resolve({ behavior: 'deny', message: 'Session closed' });
+    for (const [, pending] of session.pendingPermissions) {
+      pending.resolve({ behavior: 'deny', message: 'Session closed' });
     }
     session.pendingPermissions.clear();
 
@@ -333,6 +368,32 @@ export class SdkSessionManager {
 
   hasSession(sessionId: string): boolean {
     return this.sessions.has(sessionId);
+  }
+
+  /**
+   * Resolve a question option selection by keypress number (1-based).
+   * Looks up the stored question options and sends the option label as input.
+   * Returns true if the answer was sent.
+   */
+  resolveQuestionKeypress(sessionId: string, key: string): boolean {
+    const session = this.sessions.get(sessionId);
+    if (!session || !session.alive) return false;
+
+    const keyNum = parseInt(key, 10);
+    if (isNaN(keyNum) || keyNum < 1) return false;
+
+    // Find the first pending question that has options matching this key
+    for (const [toolUseId, options] of session.pendingQuestions) {
+      if (keyNum <= options.length) {
+        const selected = options[keyNum - 1];
+        session.pendingQuestions.delete(toolUseId);
+        // Send the option label as user input — the SDK routes it to the pending AskUserQuestion
+        return this.sendInput(sessionId, selected.label);
+      }
+    }
+
+    this.events.log(`[SDK] No pending question for keypress '${key}' in ${sessionId}`);
+    return false;
   }
 
   /** Dispose all sessions. */
@@ -480,19 +541,28 @@ export class SdkSessionManager {
     if (toolName === 'AskUserQuestion') {
       const questions = (toolInput.questions as unknown[]) || [];
       this.events.onAskQuestion(sessionId, options.toolUseID, questions);
-      return Promise.resolve({ behavior: 'allow' });
+
+      // Store options so we can map keypress numbers back to option labels
+      if (questions.length > 0) {
+        const firstQ = questions[0] as { options?: Array<{ label: string; description?: string }> };
+        if (firstQ.options && firstQ.options.length > 0) {
+          session.pendingQuestions.set(options.toolUseID, firstQ.options);
+        }
+      }
+
+      return Promise.resolve({ behavior: 'allow', updatedInput: {} });
     }
 
     // Default mode = YOLO: auto-approve everything (matches old bridge behavior
     // where the bridge simulated pressing '1' for every permission prompt)
     const mode = session.permissionMode;
     if (mode === 'default') {
-      return Promise.resolve({ behavior: 'allow' });
+      return Promise.resolve({ behavior: 'allow', updatedInput: {} });
     }
 
     // Plan / acceptEdits: forward to phone for manual approval
     return new Promise<PermissionResult>((resolve) => {
-      session.pendingPermissions.set(options.toolUseID, resolve);
+      session.pendingPermissions.set(options.toolUseID, { toolName, resolve });
 
       this.events.onPermissionRequest({
         sessionId,
