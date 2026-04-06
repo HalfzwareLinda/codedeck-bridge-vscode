@@ -166,6 +166,12 @@ export class BridgeCore {
           // to cool down (rate-limiting causes session-ready to be dropped otherwise)
           await new Promise(resolve => setTimeout(resolve, 1_000));
 
+          // Resolve the effective effort level for this session
+          const requestedEffort = (defaultEffort as EffortLevel | undefined) ?? undefined;
+          const effectiveEffort = (requestedEffort && requestedEffort !== 'auto')
+            ? requestedEffort
+            : this.readDefaultEffortLevel();
+
           // Build session info from workspace path
           const cwd = this.workspaceCwd || 'workspace';
           const project = cwd.split('/').pop() || cwd;
@@ -177,6 +183,7 @@ export class BridgeCore {
             lineCount: 0,
             title: null,
             project,
+            effortLevel: effectiveEffort,
           };
 
           // Publish session-ready (retries with backoff if rate-limited)
@@ -187,23 +194,18 @@ export class BridgeCore {
           }
           // Session launched with --permission-mode plan, seed tracked mode to match
           this.trackedModes.set(sessionId, 'plan');
+          this.trackedEffort.set(sessionId, effectiveEffort);
 
-          // Apply default effort level if specified (and not 'auto' which is Claude Code's default)
-          const effortLevel = (defaultEffort as EffortLevel | undefined) ?? undefined;
-          if (effortLevel && effortLevel !== 'auto') {
+          // Apply non-auto effort level to the terminal
+          if (requestedEffort && requestedEffort !== 'auto') {
             // Wait for Claude Code to fully initialize before sending /effort
             await new Promise(resolve => setTimeout(resolve, 3_000));
-            const effortSent = await this.terminal.sendText(`/effort ${effortLevel}`, sessionId);
+            const effortSent = await this.terminal.sendText(`/effort ${requestedEffort}`, sessionId);
             if (effortSent) {
-              this.trackedEffort.set(sessionId, effortLevel);
-              this.log(`[Codedeck] Applied default effort '${effortLevel}' to new session ${sessionId}`);
+              this.log(`[Codedeck] Applied default effort '${requestedEffort}' to new session ${sessionId}`);
             } else {
               this.log(`[Codedeck] WARNING: Failed to apply default effort to new session ${sessionId}`);
             }
-          } else {
-            // Seed with the machine's default effort level from settings
-            const machineDefault = this.readDefaultEffortLevel();
-            this.trackedEffort.set(sessionId, machineDefault);
           }
         } catch (err) {
           this.log(`[Codedeck] Terminal spawn failed for ${sessionId}: ${err}`);
