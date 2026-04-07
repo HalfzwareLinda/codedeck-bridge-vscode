@@ -15,7 +15,7 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { NostrRelay, NostrRelayEvents } from './nostrRelay';
 import { SdkSessionManager } from './sdkSession';
-import type { OutputEntry, RemoteSessionInfo, PairedPhone, UploadImageBlossomMessage, UploadImageChunkMessage } from './types';
+import type { EffortLevel, OutputEntry, RemoteSessionInfo, PairedPhone, UploadImageBlossomMessage, UploadImageChunkMessage } from './types';
 import type { PermissionMode } from '@anthropic-ai/claude-agent-sdk';
 
 export interface BridgeCoreConfig {
@@ -170,7 +170,10 @@ export class BridgeCore {
 
           // Apply default effort if requested
           if (defaultEffort) {
-            await this.sdk.setEffortLevel(sessionId, defaultEffort);
+            const { applied, confirmedLevel } = await this.sdk.setEffortLevel(sessionId, defaultEffort);
+            if (applied) {
+              session.effortLevel = confirmedLevel as EffortLevel;
+            }
           }
 
           // Publish session-ready

@@ -21,7 +21,7 @@ import type {
   CanUseTool,
   Options,
 } from '@anthropic-ai/claude-agent-sdk';
-import type { OutputEntry, RemoteSessionInfo } from './types';
+import type { EffortLevel, OutputEntry, RemoteSessionInfo } from './types';
 import { sdkMessageToEntries } from './sdkAdapter';
 
 // --- Async input generator ---
@@ -101,6 +101,8 @@ interface ManagedSession {
   seqCounter: number;
   cwd: string;
   permissionMode: PermissionMode;
+  /** Phone-level effort (e.g. 'high', 'max') — tracked so getSessions() can report it. */
+  effortLevel?: EffortLevel;
   /** Output entries history for catch-up. */
   history: Array<{ seq: number; entry: OutputEntry }>;
   /** Pending permission requests awaiting phone response, keyed by toolUseId. */
@@ -363,6 +365,7 @@ export class SdkSessionManager {
 
     try {
       await session.query.applyFlagSettings({ effortLevel: sdkEffort });
+      session.effortLevel = effort as EffortLevel;
       this.events.log(`[SDK] Effort level set to ${sdkEffort} for ${sessionId}`);
       // Confirm with the original phone level (e.g. 'max') so phone UI stays consistent
       return { applied: true, confirmedLevel: effort };
@@ -408,6 +411,7 @@ export class SdkSessionManager {
         hasTerminal: true, // SDK sessions are always "alive"
         permissionMode: s.permissionMode as 'default' | 'acceptEdits' | 'plan',
         committed: s.committed || undefined,
+        effortLevel: s.effortLevel,
       });
     }
     return sessions;
