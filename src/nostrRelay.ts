@@ -85,6 +85,7 @@ export class NostrRelay {
   // --- Output publish priority ---
   // Pause output flushing while a high-priority publish is in progress.
   private outputPaused = false;
+  private static readonly RELAY_PUBLISH_TIMEOUT_MS = 5_000;
 
   // --- Auto-approve holdoff ---
   // Briefly hold output flush so tool_use + tool_result arrive together on the phone.
@@ -325,6 +326,13 @@ export class NostrRelay {
       }
     } finally {
       this.outputPaused = false;
+      if (this.outputQueue.length > 0) {
+        if (this.outputFlushTimer) {
+          clearTimeout(this.outputFlushTimer);
+          this.outputFlushTimer = null;
+        }
+        this.flushOutputQueue();
+      }
     }
   }
 
@@ -573,7 +581,18 @@ export class NostrRelay {
             }, this.secretKey);
 
             const results = this.pool.publish(this.relays, event);
-            const outcomes = await Promise.allSettled(results);
+            const timeoutPromise = new Promise<PromiseSettledResult<string>[]>(resolve => {
+              setTimeout(() => {
+                resolve(results.map(() => ({
+                  status: 'rejected' as const,
+                  reason: new Error('relay publish timeout'),
+                })));
+              }, NostrRelay.RELAY_PUBLISH_TIMEOUT_MS);
+            });
+            const outcomes = await Promise.race([
+              Promise.allSettled(results),
+              timeoutPromise,
+            ]);
             for (let i = 0; i < outcomes.length; i++) {
               if (outcomes[i].status === 'fulfilled') {
                 anySuccess = true;
@@ -599,6 +618,14 @@ export class NostrRelay {
       return false;
     } finally {
       this.outputPaused = false;
+      // Immediately drain entries that accumulated during the pause
+      if (this.outputQueue.length > 0) {
+        if (this.outputFlushTimer) {
+          clearTimeout(this.outputFlushTimer);
+          this.outputFlushTimer = null;
+        }
+        this.flushOutputQueue();
+      }
     }
   }
 
