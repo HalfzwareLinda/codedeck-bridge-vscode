@@ -17,6 +17,7 @@ export interface RemoteSessionInfo {
   project: string;
   hasTerminal?: boolean;
   permissionMode?: PermissionMode;
+  committed?: boolean;
 }
 
 export interface AuthStatus {

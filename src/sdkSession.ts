@@ -115,6 +115,8 @@ interface ManagedSession {
   summarized: boolean;
   /** Project name extracted from session-meta tag (overrides cwd-derived name). */
   projectOverride?: string;
+  /** Whether a git commit command has been detected in this session. */
+  committed: boolean;
   /** Whether the session is still running. */
   alive: boolean;
   /** Number of times this session has been auto-restarted after crash. */
@@ -155,6 +157,7 @@ export class SdkSessionManager {
       lastActivity: new Date().toISOString(),
       title: null,
       summarized: false,
+      committed: false,
       alive: true,
       restartCount: 0,
     };
@@ -404,6 +407,7 @@ export class SdkSessionManager {
         project: s.projectOverride || s.cwd.split('/').pop() || s.cwd,
         hasTerminal: true, // SDK sessions are always "alive"
         permissionMode: s.permissionMode as 'default' | 'acceptEdits' | 'plan',
+        committed: s.committed || undefined,
       });
     }
     return sessions;
@@ -564,6 +568,21 @@ export class SdkSessionManager {
                   this.events.onSessionListChanged(this.getSessions());
                 } catch { /* ignore parse errors */ }
               }
+            }
+          }
+        }
+
+        // Detect git commit commands
+        if (!session.committed) {
+          for (const entry of entries) {
+            if (entry.entryType === 'tool_use'
+                && entry.metadata?.tool_name === 'Bash'
+                && /\bgit\s+commit\b(?!\s+--help)/.test(
+                     String((entry.metadata?.tool_input as Record<string, unknown>)?.command ?? ''))) {
+              session.committed = true;
+              this.events.log(`[SDK] Git commit detected in session ${sessionId}`);
+              this.events.onSessionListChanged(this.getSessions());
+              break;
             }
           }
         }
