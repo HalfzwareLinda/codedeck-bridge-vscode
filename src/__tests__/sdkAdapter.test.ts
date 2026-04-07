@@ -192,6 +192,89 @@ describe('sdkMessageToEntries', () => {
       expect(usageEntry!.content).toContain('500');
       expect(usageEntry!.content).toContain('200');
     });
+
+    it('tags text with agent_prompt when Agent tool_use is present', () => {
+      const msg: SDKAssistantMessage = {
+        type: 'assistant',
+        message: {
+          id: 'msg_01',
+          type: 'message',
+          role: 'assistant',
+          model: 'claude-opus-4-6',
+          content: [
+            { type: 'text', text: 'Let me explore the codebase.' },
+            { type: 'tool_use', id: 'tool_agent', name: 'Agent', input: { description: 'Explore', prompt: 'Search for files...' } },
+          ],
+          stop_reason: 'tool_use',
+          stop_sequence: null,
+          usage: { input_tokens: 100, output_tokens: 50, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        } as any,
+        parent_tool_use_id: null,
+        uuid: MSG_UUID,
+        session_id: SESSION_ID,
+      };
+
+      const entries = sdkMessageToEntries(msg);
+      const textEntry = entries.find(e => e.entryType === 'text');
+      expect(textEntry).toBeDefined();
+      expect(textEntry!.metadata?.agent_prompt).toBe(true);
+    });
+
+    it('tags entries with subagent when parent_tool_use_id is set', () => {
+      const msg: SDKAssistantMessage = {
+        type: 'assistant',
+        message: {
+          id: 'msg_01',
+          type: 'message',
+          role: 'assistant',
+          model: 'claude-opus-4-6',
+          content: [
+            { type: 'text', text: 'Searching for files...' },
+            { type: 'tool_use', id: 'tool_read', name: 'Read', input: { file_path: '/src/main.ts' } },
+          ],
+          stop_reason: 'tool_use',
+          stop_sequence: null,
+          usage: { input_tokens: 100, output_tokens: 50, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        } as any,
+        parent_tool_use_id: 'parent_agent_tool',
+        uuid: MSG_UUID,
+        session_id: SESSION_ID,
+      };
+
+      const entries = sdkMessageToEntries(msg);
+      const textEntry = entries.find(e => e.entryType === 'text');
+      expect(textEntry!.metadata?.subagent).toBe(true);
+
+      const toolEntry = entries.find(e => e.entryType === 'tool_use');
+      expect(toolEntry!.metadata?.subagent).toBe(true);
+    });
+
+    it('does NOT tag text with agent_prompt when no Agent/Task tool call present', () => {
+      const msg: SDKAssistantMessage = {
+        type: 'assistant',
+        message: {
+          id: 'msg_01',
+          type: 'message',
+          role: 'assistant',
+          model: 'claude-opus-4-6',
+          content: [
+            { type: 'text', text: 'Let me run a command.' },
+            { type: 'tool_use', id: 'tool_bash', name: 'Bash', input: { command: 'ls' } },
+          ],
+          stop_reason: 'tool_use',
+          stop_sequence: null,
+          usage: { input_tokens: 100, output_tokens: 50, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        } as any,
+        parent_tool_use_id: null,
+        uuid: MSG_UUID,
+        session_id: SESSION_ID,
+      };
+
+      const entries = sdkMessageToEntries(msg);
+      const textEntry = entries.find(e => e.entryType === 'text');
+      expect(textEntry!.metadata?.agent_prompt).toBeUndefined();
+      expect(textEntry!.metadata?.subagent).toBeUndefined();
+    });
   });
 
   describe('user messages', () => {

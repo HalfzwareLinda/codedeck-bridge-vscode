@@ -41,13 +41,25 @@ function parseAssistant(msg: SDKAssistantMessage): OutputEntry[] {
   const ts = new Date().toISOString();
   const model = msg.message.model;
 
+  // Detect Agent/Task tool calls so preceding text can be tagged for absorption
+  const hasAgentCall = msg.message.content.some(
+    (b: { type: string; name?: string }) => b.type === 'tool_use' && (b.name === 'Agent' || b.name === 'Task'),
+  );
+  // Sub-agent messages have a non-null parent_tool_use_id
+  const isSubAgent = !!msg.parent_tool_use_id;
+
   for (const block of msg.message.content) {
     if (block.type === 'text') {
       entries.push({
         entryType: 'text',
         content: block.text,
         timestamp: ts,
-        metadata: { role: 'assistant', model },
+        metadata: {
+          role: 'assistant',
+          model,
+          ...(hasAgentCall ? { agent_prompt: true } : {}),
+          ...(isSubAgent ? { subagent: true } : {}),
+        },
       });
     } else if (block.type === 'tool_use') {
       // Special handling for ExitPlanMode and AskUserQuestion
@@ -103,6 +115,7 @@ function parseAssistant(msg: SDKAssistantMessage): OutputEntry[] {
             tool_name: block.name,
             tool_use_id: block.id,
             tool_input: block.input,
+            ...(isSubAgent ? { subagent: true } : {}),
           },
         });
       }
