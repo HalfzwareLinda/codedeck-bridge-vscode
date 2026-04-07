@@ -41,12 +41,19 @@ function parseAssistant(msg: SDKAssistantMessage): OutputEntry[] {
   const ts = new Date().toISOString();
   const model = msg.message.model;
 
-  // Detect Agent/Task tool calls so preceding text can be tagged for absorption
-  const hasAgentCall = msg.message.content.some(
-    (b: { type: string; name?: string }) => b.type === 'tool_use' && (b.name === 'Agent' || b.name === 'Task'),
+  // Check if this message contains tool_use blocks (excluding ExitPlanMode/AskUserQuestion
+  // which are handled as special cards, not collapsible tool actions)
+  const hasToolUse = msg.message.content.some(
+    (b: { type: string; name?: string }) =>
+      b.type === 'tool_use' && b.name !== 'ExitPlanMode' && b.name !== 'AskUserQuestion',
   );
   // Sub-agent messages have a non-null parent_tool_use_id
   const isSubAgent = !!msg.parent_tool_use_id;
+
+  // display_hint tells the phone whether to collapse text into tool groups or show it
+  // - 'collapse': text accompanies tool calls → hide under "X actions"
+  // - 'show': text is Claude's standalone response → show as full message
+  const displayHint = (hasToolUse || isSubAgent) ? 'collapse' : 'show';
 
   for (const block of msg.message.content) {
     if (block.type === 'text') {
@@ -57,7 +64,7 @@ function parseAssistant(msg: SDKAssistantMessage): OutputEntry[] {
         metadata: {
           role: 'assistant',
           model,
-          ...(hasAgentCall ? { agent_prompt: true } : {}),
+          display_hint: displayHint,
           ...(isSubAgent ? { subagent: true } : {}),
         },
       });
