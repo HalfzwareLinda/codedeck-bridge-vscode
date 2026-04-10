@@ -146,6 +146,11 @@ function parseUser(msg: SDKUserMessage): OutputEntry[] {
   const entries: OutputEntry[] = [];
   const ts = new Date().toISOString();
   const content = msg.message.content;
+  // Sub-agent prompts have a non-null parent_tool_use_id — collapse them into tool groups
+  const isSubAgent = !!msg.parent_tool_use_id;
+  const textMeta = isSubAgent
+    ? { role: 'assistant' as const, subagent: true, display_hint: 'collapse' as const }
+    : { role: 'user' as const };
 
   // content can be string or array of content blocks
   if (typeof content === 'string') {
@@ -153,7 +158,7 @@ function parseUser(msg: SDKUserMessage): OutputEntry[] {
       entryType: 'text',
       content,
       timestamp: ts,
-      metadata: { role: 'user' },
+      metadata: textMeta,
     });
   } else if (Array.isArray(content)) {
     for (const block of content) {
@@ -162,7 +167,7 @@ function parseUser(msg: SDKUserMessage): OutputEntry[] {
           entryType: 'text',
           content: block.text,
           timestamp: ts,
-          metadata: { role: 'user' },
+          metadata: textMeta,
         });
       } else if (block.type === 'tool_result') {
         // tool_result content can be string or array
@@ -217,20 +222,38 @@ function parseResult(msg: SDKResultMessage): OutputEntry[] {
 }
 
 function parseSystem(msg: SDKSystemMessage): OutputEntry[] {
-  // Only emit init messages — other system subtypes are internal
-  if (msg.subtype !== 'init') { return []; }
-  return [{
-    entryType: 'system',
-    content: `Claude Code ${msg.claude_code_version} (${msg.model})`,
-    timestamp: new Date().toISOString(),
-    metadata: {
-      subtype: 'init',
-      model: msg.model,
-      version: msg.claude_code_version,
-      tools: msg.tools,
-      permissionMode: msg.permissionMode,
-    },
-  }];
+  if (msg.subtype === 'init') {
+    return [{
+      entryType: 'system',
+      content: `Claude Code ${msg.claude_code_version} (${msg.model})`,
+      timestamp: new Date().toISOString(),
+      metadata: {
+        subtype: 'init',
+        model: msg.model,
+        version: msg.claude_code_version,
+        tools: msg.tools,
+        permissionMode: msg.permissionMode,
+      },
+    }];
+  }
+
+  // Emit stream_end when SDK reports session is idle (turn complete).
+  // This is the authoritative signal that Claude finished responding and is
+  // waiting for user input. The phone uses stream_end to show the unread dot.
+  if (msg.subtype === 'session_state_changed') {
+    const stateMsg = msg as unknown as { state: string };
+    if (stateMsg.state === 'idle') {
+      return [{
+        entryType: 'system',
+        content: '',
+        timestamp: new Date().toISOString(),
+        metadata: { stream_end: true },
+      }];
+    }
+    return [];
+  }
+
+  return [];
 }
 
 function formatToolInput(toolName: string, input: Record<string, unknown>): string {

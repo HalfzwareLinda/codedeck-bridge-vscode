@@ -328,6 +328,40 @@ describe('sdkMessageToEntries', () => {
       expect(entries[0].content.length).toBeLessThan(2100);
       expect(entries[0].content).toContain('...[truncated]');
     });
+
+    it('tags subagent prompts with collapse hint instead of user role', () => {
+      const msg: SDKUserMessage = {
+        type: 'user',
+        message: { role: 'user', content: 'Search the codebase for...' },
+        parent_tool_use_id: 'tool_abc123',
+      };
+
+      const entries = sdkMessageToEntries(msg);
+      expect(entries).toHaveLength(1);
+      expect(entries[0].metadata?.role).toBe('assistant');
+      expect(entries[0].metadata?.subagent).toBe(true);
+      expect(entries[0].metadata?.display_hint).toBe('collapse');
+    });
+
+    it('tags subagent array content with collapse hint', () => {
+      const msg: SDKUserMessage = {
+        type: 'user',
+        message: {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Explore the src/ directory' },
+          ],
+        },
+        parent_tool_use_id: 'tool_abc456',
+      };
+
+      const entries = sdkMessageToEntries(msg);
+      const textEntry = entries.find(e => e.entryType === 'text');
+      expect(textEntry).toBeDefined();
+      expect(textEntry!.metadata?.role).toBe('assistant');
+      expect(textEntry!.metadata?.subagent).toBe(true);
+      expect(textEntry!.metadata?.display_hint).toBe('collapse');
+    });
   });
 
   describe('result messages', () => {
@@ -406,6 +440,32 @@ describe('sdkMessageToEntries', () => {
       expect(entries[0].entryType).toBe('system');
       expect(entries[0].content).toContain('1.2.3');
       expect(entries[0].metadata?.model).toBe('claude-opus-4-6');
+    });
+
+    it('converts session_state_changed idle to stream_end', () => {
+      const msg = {
+        type: 'system' as const,
+        subtype: 'session_state_changed' as const,
+        state: 'idle' as const,
+        uuid: MSG_UUID,
+        session_id: SESSION_ID,
+      };
+      const entries = sdkMessageToEntries(msg as any);
+      expect(entries).toHaveLength(1);
+      expect(entries[0].entryType).toBe('system');
+      expect(entries[0].metadata?.stream_end).toBe(true);
+    });
+
+    it('ignores session_state_changed running', () => {
+      const msg = {
+        type: 'system' as const,
+        subtype: 'session_state_changed' as const,
+        state: 'running' as const,
+        uuid: MSG_UUID,
+        session_id: SESSION_ID,
+      };
+      const entries = sdkMessageToEntries(msg as any);
+      expect(entries).toHaveLength(0);
     });
   });
 
