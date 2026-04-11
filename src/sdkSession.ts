@@ -109,6 +109,17 @@ interface ManagedSession {
   pendingPermissions: Map<string, { toolName: string; resolve: (result: PermissionResult) => void }>;
   /** Answered AskUserQuestion toolUseIds — used to skip resolved questions when scanning history. */
   answeredQuestions: Set<string>;
+  /** Pending AskUserQuestion calls awaiting user answers, keyed by toolUseId. */
+  pendingQuestions: Map<string, {
+    /** The questions array from the tool input. */
+    questions: Array<{ question: string; header?: string }>;
+    /** Accumulated answers so far (header → selected answer). */
+    answers: Record<string, string>;
+    /** Number of answers still needed before resolving. */
+    remaining: number;
+    /** Resolves the canUseTool promise with the collected answers. */
+    resolve: (result: PermissionResult) => void;
+  }>;
   /** Timestamp of last activity. */
   lastActivity: string;
   /** Title extracted from first user message. */
@@ -156,6 +167,7 @@ export class SdkSessionManager {
       history: [],
       pendingPermissions: new Map(),
       answeredQuestions: new Set(),
+      pendingQuestions: new Map(),
       lastActivity: new Date().toISOString(),
       title: null,
       summarized: false,
@@ -234,8 +246,9 @@ export class SdkSessionManager {
 
   /**
    * Send a free-text answer to a pending AskUserQuestion.
-   * Scans session history for the most recent unanswered ask_question,
-   * extracts its tool_use_id, and sends the text with parent_tool_use_id set.
+   * Scans session history for the most recent unanswered ask_question entry,
+   * finds its pending promise, and resolves it with the user's answer.
+   * For multi-question calls, accumulates answers and resolves when all are collected.
    * Falls back to regular sendInput if no pending question found.
    */
   sendQuestionInput(sessionId: string, text: string): boolean {
@@ -250,20 +263,12 @@ export class SdkSessionManager {
       const toolUseId = entry.metadata.tool_use_id as string | undefined;
       if (!toolUseId || session.answeredQuestions.has(toolUseId)) continue;
 
-      // Found the pending question — mark as answered and send with parent_tool_use_id
-      session.answeredQuestions.add(toolUseId);
+      const pending = session.pendingQuestions.get(toolUseId);
+      if (!pending) continue;
 
-      if (session.answeredQuestions.size > 50) {
-        const first = session.answeredQuestions.values().next().value;
-        if (first !== undefined) session.answeredQuestions.delete(first);
-      }
-
+      const header = (entry.metadata.header as string) || 'question';
       session.lastActivity = new Date().toISOString();
-      session.input.push({
-        type: 'user',
-        message: { role: 'user', content: text },
-        parent_tool_use_id: toolUseId,
-      });
+      this.resolveQuestionAnswer(session, toolUseId, header, text);
       return true;
     }
 
@@ -468,9 +473,43 @@ export class SdkSessionManager {
   }
 
   /**
+   * Record one answer for a pending AskUserQuestion and resolve the promise
+   * once all questions in the group have been answered.
+   */
+  private resolveQuestionAnswer(
+    session: ManagedSession,
+    toolUseId: string,
+    header: string,
+    answer: string,
+  ): void {
+    const pending = session.pendingQuestions.get(toolUseId);
+    if (!pending) return;
+
+    pending.answers[header] = answer;
+    pending.remaining--;
+
+    if (pending.remaining <= 0) {
+      // All questions answered — resolve the canUseTool promise
+      session.answeredQuestions.add(toolUseId);
+      session.pendingQuestions.delete(toolUseId);
+
+      // Prune answered set to prevent unbounded growth
+      if (session.answeredQuestions.size > 50) {
+        const first = session.answeredQuestions.values().next().value;
+        if (first !== undefined) session.answeredQuestions.delete(first);
+      }
+
+      pending.resolve({
+        behavior: 'allow',
+        updatedInput: { answers: pending.answers },
+      });
+    }
+  }
+
+  /**
    * Resolve a question option selection by keypress number (1-based).
    * Scans session history for the most recent unanswered ask_question entry,
-   * extracts its options, and sends the selected option label as user input.
+   * extracts its options, and resolves the pending promise with the selected label.
    * Returns true if the answer was sent.
    */
   resolveQuestionKeypress(sessionId: string, key: string): boolean {
@@ -488,25 +527,16 @@ export class SdkSessionManager {
       const toolUseId = entry.metadata.tool_use_id as string | undefined;
       if (!toolUseId || session.answeredQuestions.has(toolUseId)) continue;
 
+      const pending = session.pendingQuestions.get(toolUseId);
+      if (!pending) continue;
+
       const options = entry.metadata.options as Array<{ label: string }> | undefined;
       if (!options || keyNum > options.length) continue;
 
       const selected = options[keyNum - 1];
-      session.answeredQuestions.add(toolUseId);
-
-      // Prune answered set to prevent unbounded growth
-      if (session.answeredQuestions.size > 50) {
-        const first = session.answeredQuestions.values().next().value;
-        if (first !== undefined) session.answeredQuestions.delete(first);
-      }
-
-      // Send option label with parent_tool_use_id so SDK routes to the correct AskUserQuestion
+      const header = (entry.metadata.header as string) || 'question';
       session.lastActivity = new Date().toISOString();
-      session.input.push({
-        type: 'user',
-        message: { role: 'user', content: selected.label },
-        parent_tool_use_id: toolUseId,
-      });
+      this.resolveQuestionAnswer(session, toolUseId, header, selected.label);
       return true;
     }
 
@@ -683,8 +713,8 @@ export class SdkSessionManager {
    *
    * The SDK only calls canUseTool for tools that actually need approval given
    * the current permissionMode. We don't re-implement permission logic here —
-   * just forward to the phone for manual approval, or auto-allow AskUserQuestion
-   * (which is answered via the input channel, not via permission response).
+   * just forward to the phone for manual approval, or block AskUserQuestion
+   * until the user answers on the phone.
    */
   private handlePermission(
     sessionId: string,
@@ -693,13 +723,33 @@ export class SdkSessionManager {
     toolInput: Record<string, unknown>,
     options: Parameters<CanUseTool>[2],
   ): Promise<PermissionResult> {
-    // AskUserQuestion: always allow — the answer comes via sendInput(), not permission response.
-    // Question options are stored in session history as OutputEntry metadata (via sdkAdapter),
-    // so resolveQuestionKeypress() can look them up without duplicate state.
+    // AskUserQuestion: block until the user answers on the phone.
+    // The SDK expects answers via updatedInput.answers (keyed by question header).
+    // Question entries appear in the output stream via sdkAdapter, and the phone
+    // sends answers back through sendQuestionInput() / resolveQuestionKeypress().
     if (toolName === 'AskUserQuestion') {
-      const questions = (toolInput.questions as unknown[]) || [];
-      this.events.onAskQuestion(sessionId, options.toolUseID, questions);
-      return Promise.resolve({ behavior: 'allow', updatedInput: {} });
+      const rawQuestions = (toolInput.questions as Array<{ question: string; header?: string }>) || [];
+      this.events.onAskQuestion(sessionId, options.toolUseID, rawQuestions);
+
+      return new Promise<PermissionResult>((resolve) => {
+        const timer = setTimeout(() => {
+          session.pendingQuestions.delete(options.toolUseID);
+          this.events.log(`[SDK] Question timed out (${options.toolUseID}) in ${sessionId}`);
+          resolve({ behavior: 'deny', message: 'Question timed out' });
+        }, SdkSessionManager.PERMISSION_TIMEOUT_MS);
+
+        const wrappedResolve = (result: PermissionResult) => {
+          clearTimeout(timer);
+          resolve(result);
+        };
+
+        session.pendingQuestions.set(options.toolUseID, {
+          questions: rawQuestions,
+          answers: {},
+          remaining: rawQuestions.length,
+          resolve: wrappedResolve,
+        });
+      });
     }
 
     // EnterPlanMode: SDK is autonomously entering plan mode. Update our tracked

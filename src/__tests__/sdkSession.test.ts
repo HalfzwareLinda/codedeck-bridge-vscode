@@ -32,14 +32,17 @@ function createMockEvents(): SdkSessionEvents & { logs: string[] } {
   };
 }
 
-/** Inject a question entry into a session's history for testing resolveQuestionKeypress. */
+/**
+ * Inject a question entry into a session's history AND a pending question promise.
+ * Returns a promise that resolves with the PermissionResult when the question is answered.
+ */
 function injectQuestionHistory(
   sdk: SdkSessionManager,
   sessionId: string,
   toolUseId: string,
   options: Array<{ label: string; description?: string }>,
-) {
-  // Access private sessions map via any cast (test-only)
+  header = 'question',
+): Promise<PermissionResult> {
   const sessions = (sdk as any).sessions as Map<string, any>;
   const session = sessions.get(sessionId);
   if (!session) throw new Error(`Session ${sessionId} not found`);
@@ -52,11 +55,21 @@ function injectQuestionHistory(
       metadata: {
         special: 'ask_question',
         tool_use_id: toolUseId,
+        header,
         options,
         question_index: 0,
         question_count: 1,
       },
     } as OutputEntry,
+  });
+  // Also inject the pending question promise (mirrors handlePermission behavior)
+  return new Promise<PermissionResult>((resolve) => {
+    session.pendingQuestions.set(toolUseId, {
+      questions: [{ question: 'What should I do?', header }],
+      answers: {},
+      remaining: 1,
+      resolve,
+    });
   });
 }
 
@@ -87,21 +100,24 @@ describe('SdkSessionManager', () => {
   });
 
   describe('resolveQuestionKeypress', () => {
-    it('maps keypress to correct option label and sends input', () => {
-      injectQuestionHistory(sdk, SESSION_ID, 'tool_q1', [
+    it('maps keypress to correct option and resolves promise with answer', async () => {
+      const resultPromise = injectQuestionHistory(sdk, SESSION_ID, 'tool_q1', [
         { label: 'Option A' },
         { label: 'Option B' },
         { label: 'Option C' },
-      ]);
+      ], 'Approach');
 
-      const result = sdk.resolveQuestionKeypress(SESSION_ID, '2');
-      expect(result).toBe(true);
+      const sent = sdk.resolveQuestionKeypress(SESSION_ID, '2');
+      expect(sent).toBe(true);
 
-      // Verify the input was pushed with correct parent_tool_use_id
+      const result = await resultPromise;
+      expect(result.behavior).toBe('allow');
+      if (result.behavior === 'allow') {
+        expect(result.updatedInput).toEqual({ answers: { Approach: 'Option B' } });
+      }
+
       const sessions = (sdk as any).sessions as Map<string, any>;
-      const session = sessions.get(SESSION_ID);
-      // The question should now be in answeredQuestions
-      expect(session.answeredQuestions.has('tool_q1')).toBe(true);
+      expect(sessions.get(SESSION_ID).answeredQuestions.has('tool_q1')).toBe(true);
     });
 
     it('returns false for key out of range', () => {
@@ -118,29 +134,59 @@ describe('SdkSessionManager', () => {
       expect(result).toBe(false);
     });
 
-    it('skips already-answered questions and finds the next one', () => {
+    it('skips already-answered questions and finds the next one', async () => {
       // First question (already answered)
       injectQuestionHistory(sdk, SESSION_ID, 'tool_q_old', [
         { label: 'Old option' },
       ]);
-      // Mark as answered
+      // Mark as answered (remove from pendingQuestions too)
       const sessions = (sdk as any).sessions as Map<string, any>;
       sessions.get(SESSION_ID).answeredQuestions.add('tool_q_old');
+      sessions.get(SESSION_ID).pendingQuestions.delete('tool_q_old');
 
       // Second question (pending)
-      injectQuestionHistory(sdk, SESSION_ID, 'tool_q_new', [
+      const resultPromise = injectQuestionHistory(sdk, SESSION_ID, 'tool_q_new', [
         { label: 'New A' },
         { label: 'New B' },
-      ]);
+      ], 'Method');
 
-      const result = sdk.resolveQuestionKeypress(SESSION_ID, '1');
-      expect(result).toBe(true);
-      expect(sessions.get(SESSION_ID).answeredQuestions.has('tool_q_new')).toBe(true);
+      const sent = sdk.resolveQuestionKeypress(SESSION_ID, '1');
+      expect(sent).toBe(true);
+
+      const result = await resultPromise;
+      expect(result.behavior).toBe('allow');
+      if (result.behavior === 'allow') {
+        expect(result.updatedInput).toEqual({ answers: { Method: 'New A' } });
+      }
     });
 
     it('returns false for non-existent session', () => {
       const result = sdk.resolveQuestionKeypress('nonexistent', '1');
       expect(result).toBe(false);
+    });
+  });
+
+  describe('sendQuestionInput', () => {
+    it('resolves pending question promise with free-text answer', async () => {
+      const resultPromise = injectQuestionHistory(sdk, SESSION_ID, 'tool_qt1', [
+        { label: 'Option A' },
+      ], 'Library');
+
+      const sent = sdk.sendQuestionInput(SESSION_ID, 'Use axios instead');
+      expect(sent).toBe(true);
+
+      const result = await resultPromise;
+      expect(result.behavior).toBe('allow');
+      if (result.behavior === 'allow') {
+        expect(result.updatedInput).toEqual({ answers: { Library: 'Use axios instead' } });
+      }
+    });
+
+    it('falls back to sendInput when no pending question exists', () => {
+      const sent = sdk.sendQuestionInput(SESSION_ID, 'hello');
+      // sendInput returns true if session exists
+      expect(sent).toBe(true);
+      expect(events.logs.some(l => l.includes('falling back to sendInput'))).toBe(true);
     });
   });
 
