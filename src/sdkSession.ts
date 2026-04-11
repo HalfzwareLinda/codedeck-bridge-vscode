@@ -127,7 +127,7 @@ interface ManagedSession {
 
 export class SdkSessionManager {
   private static readonly MAX_RESTARTS = 2;
-  private static readonly PERMISSION_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+  private static readonly PERMISSION_TIMEOUT_MS = 24 * 60 * 60 * 1000; // 24 hours
 
   private sessions = new Map<string, ManagedSession>();
   private events: SdkSessionEvents;
